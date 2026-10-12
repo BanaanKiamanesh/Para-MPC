@@ -15,7 +15,7 @@ from jax import lax
 from .kkt import kkt_score, mv
 from .newton import factorize, newton_direction, refine_step, solve_newton
 
-METHODS = ('scan', 'sweep')
+METHODS = ('scan', 'sweep', 'cuda')
 
 
 def initial_iterate(data, x, u, lam=1.0, floor=1.0):
@@ -104,8 +104,16 @@ def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, method='scan', refine=1, 
     Returns (z, iterations, score): the most accurate iterate seen and its KKT score. A non-finite Newton step (a
     breakdown) also ends the loop, and a message says so.
 
-    method: 'scan' (associative scans) or 'sweep' (Riccati recursion). start='mehrotra' replaces z0 by Mehrotra's
-    starting point (counted as one iteration). The other options are those of `ipm_iteration` and `factorize`."""
+    method: 'scan' (associative scans), 'sweep' (Riccati recursion) or 'cuda' (the whole solve as one CUDA kernel,
+    with the default options). start='mehrotra' replaces z0 by Mehrotra's starting point (counted as one
+    iteration). The other options are those of `ipm_iteration` and `factorize`."""
+    if method == 'cuda':
+        if (refine, refine_pred, n_corr, combine, fac_dtype) != (1, 0, 1, 'auto', None):
+            raise ValueError("method='cuda' implements the default options (and either start) only")
+        from .. import cuda
+        z, k, score, mu = cuda.ipm(data, z0, tol, mu_min, max_iter, start=start)
+        _report_breakdown(jnp.isfinite(mu), k, score)
+        return z, k, score
     if method not in METHODS:
         raise ValueError(f'method must be one of {METHODS}, not {method!r}')
     k0 = 0

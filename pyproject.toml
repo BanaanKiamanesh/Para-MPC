@@ -20,14 +20,21 @@ classifiers = [
 dependencies = ["jax>=0.11", "numpy>=2.0"]
 
 [project.optional-dependencies]
+# the CUDA backend: JAX's CUDA build and the nvcc that compiles the kernel on first use
+cuda = ["jax[cuda13]>=0.11", "nvidia-cuda-nvcc>=13.0"]
 test = ["pytest>=8", "scipy>=1.11"]
 
 [tool.setuptools]
-package-dir = { "" = "src/py_wrapper" }
-packages = ["parampc", "parampc.core"]
+# the Python package lives in src/py_wrapper; the CUDA sources (src/cuda) ship inside it as parampc/_cuda
+package-dir = { "" = "src/py_wrapper", "parampc._cuda" = "src/cuda" }
+packages = ["parampc", "parampc.core", "parampc._cuda"]
+
+[tool.setuptools.package-data]
+"parampc._cuda" = ["include/parampc/*.cuh", "src/*.cu"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["gpu: needs a CUDA GPU and nvcc (skipped otherwise)"]
 
 [tool.ruff]
 line-length = 120
