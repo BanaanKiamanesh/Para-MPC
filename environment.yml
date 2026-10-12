@@ -1,0 +1,23 @@
+# conda env create -f environment.yml      (run from the repository root; installs parampc in editable mode)
+name: para-mpc
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - jax[cuda13]==0.11.1        # CPU only: jax==0.11.1
+      - nvidia-cuda-nvcc==13.4.92  # the CUDA compiler of the 'cuda' backend
+      - numpy==2.5.3
+      - scipy==1.18.1
+      - matplotlib==3.11.2
+      - jupyter==1.1.1
+      - pytest==9.1.1
+      - casadi==3.7.2              # benchmark only: the CasADi release acados v0.6 is tested with
+      - -e .
+
+# acados (benchmark only, notebooks/benchmarking), built from source:
+#   git clone --branch v0.6.0 --recursive https://github.com/acados/acados.git ~/acados
+#   cd ~/acados && mkdir build && cd build && cmake .. && make install -j
+#   pip install -e ~/acados/interfaces/acados_template
+#   conda env config vars set -n para-mpc ACADOS_SOURCE_DIR=$HOME/acados LD_LIBRARY_PATH=$HOME/acados/lib

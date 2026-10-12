@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "parampc"
+version = "0.1.0"
+description = "Parallel-in-horizon MPC: an interior-point solver whose Newton steps are associative scans (JAX, CUDA)"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Banaan Kiamanesh" }]
+keywords = ["model predictive control", "MPC", "interior-point method", "parallel scan", "JAX", "CUDA"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = ["jax>=0.11", "numpy>=2.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "scipy>=1.11"]
+
+[tool.setuptools]
+package-dir = { "" = "src/py_wrapper" }
+packages = ["parampc", "parampc.core"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E731", "E741"]   # lambdas and the names I, l are the mathematical notation here
+
+[tool.ruff.lint.isort]
+known-first-party = ["parampc", "problems", "conftest"]
