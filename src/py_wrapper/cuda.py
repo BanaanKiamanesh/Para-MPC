@@ -30,7 +30,7 @@ PHASES = ('residual', 'build', 'scan', 'S4b', 'bnd', 'chunks', 'S1', 'S2', 'S3',
 def source_dir():
     """The CUDA sources (include/, src/): $PARAMPC_CUDA_DIR, the copy shipped inside an installed package, or the
     repository's src/cuda."""
-    for d in (os.environ.get('PARAMPC_CUDA_DIR'), _PACKAGE / '_cuda', _PACKAGE.parents[1] / 'cuda'):
+    for d in (os.environ.get('PARAMPC_CUDA_DIR'), _PACKAGE / '_cuda', _PACKAGE.parent / 'cuda'):
         if d and (Path(d) / 'src' / 'ipm.cu').is_file():
             return Path(d)
     raise FileNotFoundError('parampc: CUDA sources not found (set PARAMPC_CUDA_DIR to the src/cuda directory)')

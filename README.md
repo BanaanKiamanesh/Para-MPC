@@ -38,6 +38,9 @@ pip install -e .                 # CPU: the 'scan' and 'sweep' backends
 pip install -e ".[cuda]"         # + JAX's CUDA build and nvcc: the 'cuda' backend
 ```
 
+The package is imported as `parampc` (`import parampc as pm`); its sources are `src/py_wrapper`, which the
+editable install maps to that name, so changes to them take effect without reinstalling.
+
 The CUDA kernel is compiled with the pip-installed `nvcc` the first time each problem size $(n, m)$ is solved
 (a minute or so), and cached in `~/.cache/parampc` (or `$PARAMPC_CACHE`). On a GPU, run JAX with
 `JAX_PLATFORMS=cuda,cpu`: the solver's diagnostic messages need a CPU device.
@@ -277,7 +280,7 @@ parallel.
 
 ```
 src/
-  py_wrapper/parampc/        the Python package
+  py_wrapper/                the Python package parampc
     core/                    the method in JAX: KKT system, scans (lq.py), Newton step, interior-point loop
     cuda.py                  the CUDA kernel's wrapper: build with nvcc, cache, XLA FFI registration
     qp.py, solver.py         linear MPC: OCPQP and its helpers; solve_qp, the reductions, batches

@@ -26,8 +26,8 @@ test = ["pytest>=8", "scipy>=1.11"]
 notebooks = ["jupyter", "matplotlib>=3.8", "scipy>=1.11"]
 
 [tool.setuptools]
-# the Python package lives in src/py_wrapper; the CUDA sources (src/cuda) ship inside it as parampc/_cuda
-package-dir = { "" = "src/py_wrapper", "parampc._cuda" = "src/cuda" }
+# the package parampc is src/py_wrapper; the CUDA sources (src/cuda) ship inside it as parampc/_cuda
+package-dir = { "parampc" = "src/py_wrapper", "parampc._cuda" = "src/cuda" }
 packages = ["parampc", "parampc.core", "parampc.models", "parampc._cuda"]
 
 [tool.setuptools.package-data]
