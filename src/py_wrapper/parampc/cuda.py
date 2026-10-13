@@ -74,10 +74,11 @@ def _cache_dir():
 @functools.cache
 def target(nx, nu, profile=False):
     """Compile (if needed), load and register the kernel for n = nx states and m = nu inputs. Returns the FFI
-    target's name and the library's workspace-size function."""
+    target's name and the library's workspace-size function. nvcc compiles src/ipm.cu, which includes the other
+    sources (one translation unit); the cache key hashes every header and source."""
     import jax.ffi
     root = source_dir()
-    sources = sorted((root / 'include').rglob('*.cuh')) + [root / 'src' / 'ipm.cu']
+    sources = sorted((root / 'include').glob('*.cuh')) + sorted((root / 'src').glob('*.cu'))
     arch = compute_capability()
     digest = hashlib.sha1(f'{nx},{nu},{arch},{profile}'.encode())
     for path in sources:

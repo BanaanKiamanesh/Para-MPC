@@ -31,7 +31,7 @@ package-dir = { "" = "src/py_wrapper", "parampc._cuda" = "src/cuda" }
 packages = ["parampc", "parampc.core", "parampc.models", "parampc._cuda"]
 
 [tool.setuptools.package-data]
-"parampc._cuda" = ["include/parampc/*.cuh", "src/*.cu"]
+"parampc._cuda" = ["include/*.cuh", "src/*.cu"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

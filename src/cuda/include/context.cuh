@@ -1,7 +1,7 @@
 // The kernel context: problem data, iterates and the workspace arrays, all in global memory.
 #pragma once
 
-#include "parampc/config.cuh"
+#include "config.cuh"
 
 struct Ctx {
   int N, M, E, L, P, H, WS, WSG;            // horizon, rows, N+1, chunk length / count, tree height, smem/warp, /group

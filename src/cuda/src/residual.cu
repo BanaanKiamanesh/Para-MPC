@@ -1,11 +1,7 @@
-// The KKT residual at the current iterate.
-#pragma once
+// The KKT residual at the current iterate (residual.cuh).
+#include "residual.cuh"
+#include "warp_linalg.cuh"
 
-#include "parampc/context.cuh"
-#include "parampc/warp_linalg.cuh"
-
-// ------------------------------------------------------------- residuals ---
-// residual rows of the KKT system at the current iterate (the tau-independent part) and the KKT score's parts
 template <int G>
 __device__ __forceinline__ void task_residual(const Ctx& c, int t, Lanes<G> ln, double& pmax, double& psum) {
   const int lane = ln.sl;                                            // the lane within the group
@@ -28,7 +24,9 @@ __device__ __forceinline__ void task_residual(const Ctx& c, int t, Lanes<G> ln, 
   const double *nt = c.nu + (size_t)t * NX, *n1 = nt + NX, *lt = c.lam + (size_t)t * M, *st = c.s + (size_t)t * M;
   for (int i = lane; i < NX; i += G) {
     double qx = 0.0, su = 0.0, an = 0.0, cl = 0.0, ax = 0.0, bu = 0.0;
-    for (int j = 0; j < NX; ++j) { qx += Q[i * NX + j] * xt[j]; an += A[j * NX + i] * n1[j]; ax += A[i * NX + j] * xt[j]; }
+    for (int j = 0; j < NX; ++j) {
+      qx += Q[i * NX + j] * xt[j]; an += A[j * NX + i] * n1[j]; ax += A[i * NX + j] * xt[j];
+    }
     for (int j = 0; j < NU; ++j) { su += S[j * NX + i] * ut[j]; bu += B[i * NU + j] * ut[j]; }
     for (int k = 0; k < M; ++k) cl += C[k * NX + i] * lt[k];
     const double vx = nt[i] - qx - su - c.q[(size_t)t * NX + i] - an - cl;

@@ -1,23 +1,12 @@
-// One solve with the factorization: right-hand side, the two affine recursions by chunks with a scan over
-// the chunk boundaries, and the recovery of the step.
-#pragma once
-
-#include "parampc/context.cuh"
-#include "parampc/warp_linalg.cuh"
-
-// ------------------------------------------------------------- one solve ---
-struct SolveArgs {
-  int kind;
-  double tau, tp, td;   // tau = sigma mu; tp, td: trial step lengths of the centrality corrector
-  bool keep;            // refinement: whether the centrality correction was kept
-};
+// One solve with the factorization (solve.cuh).
+#include "solve.cuh"
+#include "warp_linalg.cuh"
 
 // the step being refined: STEP, plus DIR if the centrality correction was kept
-__device__ __forceinline__ double stp(const double* Sv, const double* Dv, size_t i, bool keep) {
+static __device__ __forceinline__ double stp(const double* Sv, const double* Dv, size_t i, bool keep) {
   return keep ? Sv[i] + Dv[i] : Sv[i];
 }
 
-// S1: right-hand side of the solve (newton_direction's lq_rhs and the g of solve_lq)
 template <int G>
 __device__ __forceinline__ void task_s1(const Ctx& c, int t, Lanes<G> ln, double* ws, const SolveArgs& a) {
   const int lane = ln.sl;                                            // the lane within the group
@@ -99,7 +88,9 @@ __device__ __forceinline__ void task_s1(const Ctx& c, int t, Lanes<G> ln, double
       rd = c.rd[(size_t)t * NX + i];
       if (ref) {
         double qx = 0.0, su_ = 0.0, an = 0.0, cl = 0.0, ax = 0.0, bu = 0.0;
-        for (int j = 0; j < NX; ++j) { qx += Q[i * NX + j] * sx0[j]; an += A[j * NX + i] * sn1[j]; ax += A[i * NX + j] * sx0[j]; }
+        for (int j = 0; j < NX; ++j) {
+          qx += Q[i * NX + j] * sx0[j]; an += A[j * NX + i] * sn1[j]; ax += A[i * NX + j] * sx0[j];
+        }
         for (int j = 0; j < NU; ++j) { su_ += S[j * NX + i] * su[j]; bu += B[i * NU + j] * su[j]; }
         for (int k = 0; k < M; ++k) cl += C[k * NX + i] * sl[k];
         rx = rx + (sn0[i] - qx - su_ - an - cl);
@@ -155,7 +146,7 @@ __device__ __forceinline__ void task_s1(const Ctx& c, int t, Lanes<G> ln, double
 }
 
 // lane i < NX: sum_j a[j] x[j] with two accumulators (shorter dependency chain)
-__device__ __forceinline__ double dot2(const double* a, const double* x) {
+static __device__ __forceinline__ double dot2(const double* a, const double* x) {
   double s0 = 0.0, s1 = 0.0;
 #pragma unroll
   for (int j = 0; j + 1 < NX; j += 2) { s0 += a[j] * x[j]; s1 += a[j + 1] * x[j + 1]; }
@@ -168,7 +159,7 @@ __device__ __forceinline__ double dot2(const double* a, const double* x) {
 // the next PF steps are loaded while the current step computes (PF = 2 or 3 was slower: register pressure).
 constexpr int PF = 1;
 template <class Fetch, class Emit>
-__device__ void chain(int len, int lane, double* ws, const double* y0, Fetch fetch, Emit emit) {
+static __device__ void chain(int len, int lane, double* ws, const double* y0, Fetch fetch, Emit emit) {
   const int i = lane < NX ? lane : 0;
   double *ya = ws, *yb = ws + NX;
   double row[PF][NX], vv[PF];
@@ -192,7 +183,6 @@ __device__ void chain(int len, int lane, double* ws, const double* y0, Fetch fet
   }
 }
 
-// S2: local backward recursion q_t = Acl_t' q_{t+1} + g_t in a chunk, from q = 0 at its end
 __device__ void task_s2(const Ctx& c, int ch, int lane, double* ws) {
   const int c0 = ch * c.L, c1 = min(c.N, c0 + c.L);
   chain(c1 - c0, lane, ws, nullptr,
@@ -214,13 +204,12 @@ __device__ void task_s2(const Ctx& c, int ch, int lane, double* ws) {
 // levels of matrix-vector products in one block (block barriers), instead of P sequential steps on one warp.
 
 // Ahat^(l)_j, row-major; dir 0: forward (S5), 1: backward (S3)
-__device__ __forceinline__ const double* bnd_A(const Ctx& c, int dir, int l, int j) {
+static __device__ __forceinline__ const double* bnd_A(const Ctx& c, int dir, int l, int j) {
   if (l == 0)
     return dir ? c.Ps + (size_t)(c.P - 1 - j) * c.L * N2 : c.Fp + (size_t)(min(c.N, (j + 1) * c.L) - 1) * N2;
   return (dir ? c.Tb : c.Tf) + ((size_t)(l - 1) * c.P + j) * N2;
 }
 
-// level l >= 1 of the matrix part, both directions: Ahat^(l)_j for j = 2^l..P-1
 __device__ __forceinline__ void bnd_level(const Ctx& c, int l, int gw, int TW, int lane) {
   const int s = 1 << (l - 1), n = c.P - (1 << l);
   for (int task = gw; task < 2 * n; task += TW) {
@@ -233,7 +222,8 @@ __device__ __forceinline__ void bnd_level(const Ctx& c, int l, int gw, int TW, i
 // one pass, by the whole block (GP lanes per boundary); buf: 2 P NX doubles of shared memory.
 // bv(j, i) gives b_j[i]; emit(j, i, v) stores z_{j+1}[i] = v.
 template <class Bv, class Emit>
-__device__ __forceinline__ void bnd_pass(const Ctx& c, int dir, const double* z0, double* buf, Bv bv, Emit emit) {
+static __device__ __forceinline__ void bnd_pass(const Ctx& c, int dir, const double* z0, double* buf, Bv bv,
+                                                Emit emit) {
   const int ng = blockDim.x / GP, gi = threadIdx.x / GP, i = threadIdx.x % GP;
   double *src = buf, *dst = buf + (size_t)c.P * NX;
   for (int j = gi; j < c.P; j += ng)
@@ -257,16 +247,15 @@ __device__ __forceinline__ void bnd_pass(const Ctx& c, int dir, const double* z0
     if (i < NX) emit(j, i, src[j * NX + i]);
 }
 
-// S3: costates at the chunk starts, p_c0 = Ps_c0 p_c1 + q_c0, from p_N = rhoxN
 __device__ __forceinline__ void task_s3(const Ctx& c, double* buf) {
   if (threadIdx.x < NX) c.p[(size_t)c.N * NX + threadIdx.x] = c.rhoxN[threadIdx.x];
   bnd_pass(c, 1, c.rhoxN, buf,
            [&](int j, int i) __attribute__((always_inline)) { return c.ql[(size_t)(c.P - 1 - j) * c.L * NX + i]; },
-           [&](int j, int i, double v) __attribute__((always_inline)) { c.p[(size_t)(c.P - 1 - j) * c.L * NX + i] = v; });
+           [&](int j, int i, double v) __attribute__((always_inline)) {
+             c.p[(size_t)(c.P - 1 - j) * c.L * NX + i] = v;
+           });
 }
 
-// S4a (per stage, parallel): the costate p_t inside its chunk, p_t = Ps_t p_c1 + q_t, then the gain
-// k_t = Sigma_t^-1 (rhou_t + B_t'(P_{t+1} chat_t + p_{t+1})) and f_t = chat_t - B_t k_t
 template <int G>
 __device__ __forceinline__ void task_s4a(const Ctx& c, int t, Lanes<G> ln, double* ws) {
   const int lane = ln.sl;                                            // the lane within the group
@@ -310,7 +299,6 @@ __device__ __forceinline__ void task_s4a(const Ctx& c, int t, Lanes<G> ln, doubl
   __syncwarp(ln.gm);
 }
 
-// S4b: local forward recursion y_{t+1} = Acl_t y_t + f_t in a chunk, from y = 0 at its start
 __device__ void task_s4b(const Ctx& c, int ch, int lane, double* ws) {
   const int c0 = ch * c.L, c1 = min(c.N, c0 + c.L);
   chain(c1 - c0, lane, ws, nullptr,
@@ -326,7 +314,6 @@ __device__ void task_s4b(const Ctx& c, int ch, int lane, double* ws) {
         });
 }
 
-// S5: states at the chunk ends, x_c1 = Fp_{c1-1} x_c0 + yend, from x_0 = dx0
 __device__ __forceinline__ void task_s5(const Ctx& c, double* buf) {
   if (threadIdx.x < NX) c.dxb[threadIdx.x] = c.dx0[threadIdx.x];
   bnd_pass(c, 0, c.dx0, buf, [&](int j, int i) __attribute__((always_inline)) { return c.yend[(size_t)j * NX + i]; },
@@ -335,7 +322,6 @@ __device__ __forceinline__ void task_s5(const Ctx& c, double* buf) {
            });
 }
 
-// S6: dx_t, du_t, dnu_t, dlam_t, ds_t; writes the result of this solve and the step-length partials
 template <int G>
 __device__ __forceinline__ void task_s6(const Ctx& c, int t, Lanes<G> ln, double* ws, const SolveArgs& a, double& rs,
                                         double& rl) {

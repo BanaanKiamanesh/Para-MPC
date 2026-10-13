@@ -1,10 +1,7 @@
-// Warp-level dense linear algebra on small matrices in shared memory (one warp, or a group of its lanes).
-#pragma once
+// Warp-level dense linear algebra on small matrices in shared memory (warp_linalg.cuh).
+#include "warp_linalg.cuh"
 
-#include "parampc/config.cuh"
-
-// ------------------------------------------------------------------ helpers ---
-__device__ __forceinline__ double nmin(double a, double b) { return (a < b || a != a) ? a : b; }  // NaN-propagating
+__device__ __forceinline__ double nmin(double a, double b) { return (a < b || a != a) ? a : b; }
 __device__ __forceinline__ double nmax(double a, double b) { return (a > b || a != a) ? a : b; }
 __device__ __forceinline__ double clip01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 
@@ -12,16 +9,14 @@ __device__ __forceinline__ double combine_op(double a, double b, int op) {
   return op == SUM ? a + b : (op == MIN ? nmin(a, b) : nmax(a, b));
 }
 
-// warp reduction; the result is lane 0's and broadcast, so every lane holds the same bits
 __device__ double warp_reduce(double v, int op) {
   for (int o = 16; o > 0; o >>= 1) v = combine_op(v, __shfl_xor_sync(FULL, v, o), op);
   return __shfl_sync(FULL, v, 0);
 }
 
-// out (R x C, row stride ldo) = add + sign * op(A) op(B); op(A) is R x K, op(B) is K x C
 template <int R, int K, int C, bool TA, bool TB>
 __device__ void mm(double* out, int ldo, const double* A, int lda, const double* B, int ldb, int lane,
-                   const double* add = nullptr, int ldadd = 0, double sign = 1.0) {
+                   const double* add, int ldadd, double sign) {
   for (int e = lane; e < R * C; e += 32) {
     const int i = e / C, j = e % C;
     double acc = 0.0;
@@ -32,16 +27,13 @@ __device__ void mm(double* out, int ldo, const double* A, int lda, const double*
   __syncwarp();
 }
 
-// L = cholesky(sym(A)), lower, and dinv = 1 / diag(L); NaN if A is not positive definite (as
-// jnp.linalg.cholesky). fp64 division and square root cost 300-450 cycles on this GPU (an FMA 50), so each
-// column takes one reciprocal square root, and its scaling is fused with the trailing update, which reads
-// the unscaled column from the working copy `wk` (may be A itself if A is scratch): one barrier per column.
-// The trailing updates only touch the entries (i, k) with 1 <= k <= i (n(n-1)/2 of them, 28 for n = 8: one
-// pass of the warp); each lane owns fixed entries for all columns, so there is no per-column index arithmetic
-// (which the compiler hoisted out of the IPM loop and kept in registers). G lanes (a warp, or a group of a warp
-// synchronized by the mask gm) do the work.
-template <int Nn, int G = 32>
-__device__ void chol(double* L, double* dinv, const double* A, int lda, double* wk, int lane, unsigned gm = FULL) {
+// fp64 division and square root cost 300-450 cycles on this GPU (an FMA 50), so each column takes one reciprocal
+// square root, and its scaling is fused with the trailing update, which reads the unscaled column from the
+// working copy wk: one barrier per column. The trailing updates only touch the entries (i, k) with 1 <= k <= i
+// (n(n-1)/2 of them, 28 for n = 8: one pass of the warp); each lane owns fixed entries for all columns, so there
+// is no per-column index arithmetic (which the compiler hoisted out of the IPM loop and kept in registers).
+template <int Nn, int G>
+__device__ void chol(double* L, double* dinv, const double* A, int lda, double* wk, int lane, unsigned gm) {
   for (int e = lane; e < Nn * Nn; e += G) {           // sym(A) via L, as A may alias wk
     const int i = e / Nn, j = e % Nn;
     L[e] = i >= j ? 0.5 * (A[i * lda + j] + A[j * lda + i]) : 0.0;
@@ -73,10 +65,10 @@ __device__ void chol(double* L, double* dinv, const double* A, int lda, double* 
   }
 }
 
-// X = L^-1 B: each lane owns a column and substitutes forward (no barriers inside); X may alias B
-template <int Nn, int G = 32>
+// each lane owns a column and substitutes forward (no barriers inside)
+template <int Nn, int G>
 __device__ void trsm_l(double* X, int ldx, const double* L, const double* dinv, const double* B, int ldb, int ncols,
-                       int lane, unsigned gm = FULL) {
+                       int lane, unsigned gm) {
   for (int cc = lane; cc < ncols; cc += G) {
     double x[Nn];
 #pragma unroll
@@ -93,10 +85,10 @@ __device__ void trsm_l(double* X, int ldx, const double* L, const double* dinv, 
   __syncwarp(gm);
 }
 
-// X = L^-T B: each lane owns a column and substitutes backward; X may alias B
-template <int Nn, int G = 32>
+// each lane owns a column and substitutes backward
+template <int Nn, int G>
 __device__ void trsm_lt(double* X, int ldx, const double* L, const double* dinv, const double* B, int ldb, int ncols,
-                        int lane, unsigned gm = FULL) {
+                        int lane, unsigned gm) {
   for (int cc = lane; cc < ncols; cc += G) {
     double x[Nn];
 #pragma unroll
@@ -113,7 +105,6 @@ __device__ void trsm_lt(double* X, int ldx, const double* L, const double* dinv,
   __syncwarp(gm);
 }
 
-// solve Am X = Bm in place by LU with partial pivoting (as jnp.linalg.solve); Am is destroyed
 __device__ void lu_solve(double* Am, double* Bm, int ldb, int nc, int lane) {
   for (int k = 0; k < NX; ++k) {
     double v = (lane >= k && lane < NX) ? fabs(Am[lane * NX + k]) : -1.0;
@@ -125,8 +116,12 @@ __device__ void lu_solve(double* Am, double* Bm, int ldb, int nc, int lane) {
     }
     const int piv = __shfl_sync(FULL, idx, 0);
     if (piv != k) {
-      for (int j = lane; j < NX; j += 32) { const double a = Am[k * NX + j]; Am[k * NX + j] = Am[piv * NX + j]; Am[piv * NX + j] = a; }
-      for (int j = lane; j < nc; j += 32) { const double b = Bm[k * ldb + j]; Bm[k * ldb + j] = Bm[piv * ldb + j]; Bm[piv * ldb + j] = b; }
+      for (int j = lane; j < NX; j += 32) {
+        const double a = Am[k * NX + j]; Am[k * NX + j] = Am[piv * NX + j]; Am[piv * NX + j] = a;
+      }
+      for (int j = lane; j < nc; j += 32) {
+        const double b = Bm[k * ldb + j]; Bm[k * ldb + j] = Bm[piv * ldb + j]; Bm[piv * ldb + j] = b;
+      }
     }
     __syncwarp();
     const double akk = Am[k * NX + k];

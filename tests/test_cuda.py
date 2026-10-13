@@ -14,7 +14,7 @@ pytestmark = pytest.mark.gpu
 
 
 def p_offset(N, M, n, m):
-    """Offset (in doubles) of the cost-to-go matrices P_t in the kernel's workspace (carve() in src/cuda/src/ipm.cu)."""
+    """Offset (in doubles) of the cost-to-go matrices P_t in the kernel's workspace (carve() in src/cuda/src/ffi.cu)."""
     E, N2, ks_alloc = N + 1, n * n, 2048
     sizes = [E * n, N * m, E * n, N * M, N * M, N * M, N * N2, N * m * n, N * m * m, E * 3 * N2,
              min(E, ks_alloc) * 3 * N2]

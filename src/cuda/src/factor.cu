@@ -1,13 +1,8 @@
-// The matrix part of the Newton step: barrier-augmented stage data, the value-function scan for P_t, the
-// gains and closed loop, and the chunk transition matrices of the solves.
-#pragma once
+// The matrix part of the Newton step (factor.cuh).
+#include "factor.cuh"
+#include "grid.cuh"
+#include "warp_linalg.cuh"
 
-#include "parampc/context.cuh"
-#include "parampc/grid.cuh"
-#include "parampc/warp_linalg.cuh"
-
-// --------------------------------------------------------- factorization ---
-// barrier-augmented stage data and the stage element (Abar, M, Qbar) of the value-function scan
 template <int G>
 __device__ __forceinline__ void task_build(const Ctx& c, int t, Lanes<G> ln, double* ws) {
   const int lane = ln.sl;                                            // the lane within the group
@@ -75,8 +70,8 @@ __device__ __forceinline__ void task_build(const Ctx& c, int t, Lanes<G> ln, dou
 
 // G = (I + J2 C1)^-1 J2: Cholesky form W'W or LU; for the general combine also
 // Y = (I + C1 J2)^-1 [C1, A1] (n x 2n). Operands in shared memory.
-__device__ void combine_core(const double* A1, const double* C1, const double* J2, double* G, double* Y,
-                             double* ws, bool lu, int lane) {
+static __device__ void combine_core(const double* A1, const double* C1, const double* J2, double* G, double* Y,
+                                    double* ws, bool lu, int lane) {
   double *Lm = ws, *Rm = Lm + N2, *Wm = Rm + N2, *T1 = Wm + N2, *T2 = T1 + N2, *dl = T2 + N2, *dr = dl + NX;
   if (!lu) {
     chol<NX>(Lm, dl, J2, NX, T2, lane);
@@ -125,9 +120,10 @@ __device__ void combine_core(const double* A1, const double* C1, const double* J
   }
 }
 
-// up-sweep node: out = a1 (x) a2 (the value-function combine); a1 earlier in time. The operands are staged in shared memory;
-// out may be a1's slot.
-__device__ void task_combine(const double* a1, const double* a2, double* out, int lane, double* ws, bool lu) {
+// up-sweep node: out = a1 (x) a2 (the value-function combine); a1 earlier in time. The operands are staged in
+// shared memory; out may be a1's slot.
+static __device__ void task_combine(const double* a1, const double* a2, double* out, int lane, double* ws,
+                                    bool lu) {
   double *A1 = ws, *C1 = A1 + N2, *J1 = C1 + N2, *A2 = J1 + N2, *C2 = A2 + N2, *J2 = C2 + N2;
   double *G = J2 + N2, *Y = G + N2, *T1 = Y + 2 * N2, *T2 = T1 + N2, *A12 = T2 + N2, *wk = A12 + N2;
   for (int e = lane; e < 3 * N2; e += 32) { A1[e] = a1[e]; A2[e] = a2[e]; }   // one coalesced load
@@ -153,8 +149,8 @@ __device__ void task_combine(const double* a1, const double* a2, double* out, in
 }
 
 // down-sweep node: P_j = J of a1 (x) (0, 0, P_{j+s}), the Riccati map in information form
-__device__ void task_riccati(const double* a1, const double* J2, double* Pout, int lane, double* ws, bool lu,
-                             double& bad) {
+static __device__ void task_riccati(const double* a1, const double* J2, double* Pout, int lane, double* ws, bool lu,
+                                    double& bad) {
   double *A1 = ws, *C1 = A1 + N2, *J1 = C1 + N2, *J2s = J1 + N2;
   double *G = J2s + N2, *T1 = G + N2, *T2 = T1 + N2, *wk = T2 + N2;
   for (int e = lane; e < 3 * N2; e += 32) A1[e] = a1[e];
@@ -178,9 +174,9 @@ __device__ void task_riccati(const double* a1, const double* J2, double* Pout, i
 // has rank m, and their combines reduce to this form (Woodbury): one m x m Cholesky instead
 // of two n x n ones, with the arithmetic of one step of the sweep. A, B: stage data staged in shared memory;
 // wk: NU NX + NU^2 + 2 N2 scratch.
-__device__ __forceinline__ void riccati_step(const Ctx& c, int t, const double* P, double* Pn, double* A, double* B,
-                                             double* Lg, double* di, double* Y, double* K, double* Acl, double* wk,
-                                             int lane) {
+static __device__ __forceinline__ void riccati_step(const Ctx& c, int t, const double* P, double* Pn, double* A,
+                                                    double* B, double* Lg, double* di, double* Y, double* K,
+                                                    double* Acl, double* wk, int lane) {
   const double *Ag = c.A + (size_t)t * N2, *Bg = c.B + (size_t)t * NX * NU;
   for (int e = lane; e < N2; e += 32) A[e] = Ag[e];
   for (int e = lane; e < NX * NU; e += 32) B[e] = Bg[e];
@@ -209,8 +205,8 @@ __device__ __forceinline__ void riccati_step(const Ctx& c, int t, const double* 
   }
 }
 
-__device__ __forceinline__ void store_gains(const Ctx& c, int t, const double* Lg, const double* di, const double* K,
-                                            const double* Acl, int lane) {
+static __device__ __forceinline__ void store_gains(const Ctx& c, int t, const double* Lg, const double* di,
+                                                   const double* K, const double* Acl, int lane) {
   for (int e = lane; e < NU * NU; e += 32) c.Ls[(size_t)t * NU * NU + e] = Lg[e];
   for (int i = lane; i < NU; i += 32) c.Ldi[(size_t)t * NU + i] = di[i];
   for (int e = lane; e < NU * NX; e += 32) c.K[(size_t)t * NU * NX + e] = K[e];
@@ -219,7 +215,8 @@ __device__ __forceinline__ void store_gains(const Ctx& c, int t, const double* L
 
 // up-sweep leaf: T_i = (stage i) (x) T_{i+1}. With P = J2 and the step's K, Lg (the combine by Woodbury):
 //   A12 = A2 (A - BK),   C12 = A2 B Sigma^-1 B'A2' + C2 = Z'Z + C2 (Z = Lg^-1 B'A2'),   J12 = R(J2)
-__device__ __forceinline__ void task_leaf_up(const Ctx& c, int i, int lane, double* ws, double* out) {
+static __device__ __forceinline__ void task_leaf_up(const Ctx& c, int i, int lane, double* ws,
+                                                    double* out) {
   double *A = ws, *B = A + N2, *Lg = B + NX * NU, *di = Lg + NU * NU, *Y = di + NU, *K = Y + NU * NX;
   double *Acl = K + NU * NX, *A2 = Acl + N2, *C2 = A2 + N2, *P = C2 + N2, *Jn = P + N2, *Z = Jn + N2, *wk = Z + NU * NX;
   const double* a2 = c.T + (size_t)(i + 1) * 3 * N2;
@@ -240,7 +237,8 @@ __device__ __forceinline__ void task_leaf_up(const Ctx& c, int i, int lane, doub
 
 // down-sweep leaf: P_j = R(P_{j+1}) at stage j (P_N = QN), then the gains of stages j and j - 1, which need
 // P_{j+1} and P_j: every gain is computed here, so the factorization needs no separate gains phase
-__device__ __forceinline__ void task_leaf_down(const Ctx& c, int j, int lane, double* ws, double& bad) {
+static __device__ __forceinline__ void task_leaf_down(const Ctx& c, int j, int lane, double* ws,
+                                                      double& bad) {
   double *A = ws, *B = A + N2, *Lg = B + NX * NU, *di = Lg + NU * NU, *Y = di + NU, *K = Y + NU * NX;
   double *Acl = K + NU * NX, *P = Acl + N2, *Pj = P + N2, *wk = Pj + N2;
   if (j < c.N) {
@@ -261,7 +259,7 @@ __device__ __forceinline__ void task_leaf_down(const Ctx& c, int j, int lane, do
 }
 
 // gains of stage t from P_{t+1}
-__device__ __forceinline__ void task_gains(const Ctx& c, int t, int lane, double* ws) {
+static __device__ __forceinline__ void task_gains(const Ctx& c, int t, int lane, double* ws) {
   double *A = ws, *B = A + N2, *Lg = B + NX * NU, *di = Lg + NU * NU, *Y = di + NU, *K = Y + NU * NX;
   double *Acl = K + NU * NX, *P = Acl + N2, *wk = P + N2;
   for (int e = lane; e < N2; e += 32) P[e] = c.Pm[(size_t)(t + 1) * N2 + e];
@@ -271,7 +269,7 @@ __device__ __forceinline__ void task_gains(const Ctx& c, int t, int lane, double
 }
 
 // P_t = J of the element in `src`, with the finiteness check
-__device__ __forceinline__ void copy_J(const double* src, double* Pout, int lane, double& bad) {
+static __device__ __forceinline__ void copy_J(const double* src, double* Pout, int lane, double& bad) {
   for (int e = lane; e < N2; e += 32) {
     const double v = src[2 * N2 + e];
     Pout[e] = v;
@@ -331,7 +329,8 @@ __device__ __forceinline__ void factor(const Ctx& c, cg::grid_group& grid, int g
         a = 2 * s * k;
         if (l == 0) { kind = LEAF_UP; out = c.T + (size_t)a * 3 * N2; }   // stage a is not read again
         else {
-          kind = COMBINE; x1 = c.T + (size_t)a * 3 * N2; x2 = c.T + (size_t)(a + s) * 3 * N2; out = c.T + (size_t)a * 3 * N2;
+          kind = COMBINE; x1 = c.T + (size_t)a * 3 * N2; x2 = c.T + (size_t)(a + s) * 3 * N2;
+          out = c.T + (size_t)a * 3 * N2;
         }
       } else if (phase == 1) {
         const int t = k;
@@ -375,19 +374,20 @@ __device__ __forceinline__ void factor(const Ctx& c, cg::grid_group& grid, int g
   }
 }
 
-// chunk transitions: forward Fp_t = Acl_t ... Acl_c0, backward Ps_t = Acl_t' ... Acl_{c1-1}'
 __device__ void task_chunk(const Ctx& c, int task, int lane) {
   const int ch = task >> 1, c0 = ch * c.L, c1 = min(c.N, c0 + c.L);
   if ((task & 1) == 0) {
     for (int e = lane; e < N2; e += 32) c.Fp[(size_t)c0 * N2 + e] = c.Acl[(size_t)c0 * N2 + e];
     __syncwarp();
     for (int t = c0 + 1; t < c1; ++t)
-      mm<NX, NX, NX, false, false>(c.Fp + (size_t)t * N2, NX, c.Acl + (size_t)t * N2, NX, c.Fp + (size_t)(t - 1) * N2, NX, lane);
+      mm<NX, NX, NX, false, false>(c.Fp + (size_t)t * N2, NX, c.Acl + (size_t)t * N2, NX, c.Fp + (size_t)(t - 1) * N2,
+                                   NX, lane);
   } else {
     const double* Al = c.Acl + (size_t)(c1 - 1) * N2;
     for (int e = lane; e < N2; e += 32) c.Ps[(size_t)(c1 - 1) * N2 + e] = Al[(e % NX) * NX + e / NX];
     __syncwarp();
     for (int t = c1 - 2; t >= c0; --t)
-      mm<NX, NX, NX, true, false>(c.Ps + (size_t)t * N2, NX, c.Acl + (size_t)t * N2, NX, c.Ps + (size_t)(t + 1) * N2, NX, lane);
+      mm<NX, NX, NX, true, false>(c.Ps + (size_t)t * N2, NX, c.Acl + (size_t)t * N2, NX, c.Ps + (size_t)(t + 1) * N2,
+                                  NX, lane);
   }
 }

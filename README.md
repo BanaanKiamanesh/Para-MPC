@@ -286,8 +286,10 @@ src/
     models/                  example problems: quadrotor, cart-pole, linear plants
     testing.py               dense references and KKT certificates
   cuda/
-    include/parampc/         the kernel's headers: configuration, warp linear algebra, factorization, solves
-    src/ipm.cu               the kernel and its XLA FFI handler
+    include/                 the kernel's headers: configuration, context, and the declarations of each part
+    src/                     their implementations: warp linear algebra, residual, factorization, solves, the
+                             kernel (kernel.cu) and its XLA FFI handler (ffi.cu); ipm.cu, the file nvcc
+                             compiles, includes them all as one translation unit
 tests/                       pytest suite
 notebooks/                   01 linear MPC, 02 nonlinear MPC, 03 verification
   benchmarking/              the benchmark against acados (notebook, worker, acados problem definitions)
