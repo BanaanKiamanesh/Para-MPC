@@ -253,39 +253,72 @@ against the JAX implementation.
 
 Measured with [`notebooks/benchmarking/acados_benchmark.ipynb`](notebooks/benchmarking/acados_benchmark.ipynb)
 against acados v0.6 (HPIPM, single-threaded C), on one laptop (Intel i7-11370H, NVIDIA RTX 3070 Laptop GPU),
-performance power mode, no other GPU job. Each measurement solves one problem in a fresh process, after one second of
-untimed solves; times are medians. Both solvers solve the same problems and return the same objective (to the solver
-tolerances) at every horizon.
+performance power mode, no other GPU job (2026-10-14). Each measurement solves one problem in a fresh process, after
+one second of untimed solves; times are medians. Both solvers solve the same problems and return the same objective
+(to the solver tolerances) at every horizon.
 
-- **Linear MPC**: one QP, an open-loop unstable LTI system ($n=8$, $m=4$) with input and state boxes.
-- **Quadrotor NMPC**: one SQP iteration of the slung-load quadrotor from the hover guess (the same SQP iterate in
-  both solvers).
+**Linear MPC**: one QP, an open-loop unstable LTI system ($n=8$, $m=4$) with input and state boxes.
 
-| $N$ | linear: acados | linear: `cuda` | linear: `scan` (GPU) | quadrotor: acados | quadrotor: `cuda` | quadrotor: `scan` (GPU) |
-|---:|---:|---:|---:|---:|---:|---:|
-| 16 | 0.16 ms | 2.05 ms (0.08×) | 10.4 ms (0.02×) | 0.35 ms | 4.59 ms (0.08×) | 25.2 ms (0.01×) |
-| 64 | 0.65 ms | 2.42 ms (0.27×) | 11.8 ms (0.06×) | 1.73 ms | 5.88 ms (0.29×) | 32.9 ms (0.05×) |
-| 256 | 2.81 ms | 3.20 ms (0.88×) | 16.3 ms (0.17×) | 7.58 ms | 8.57 ms (0.88×) | 45.2 ms (0.17×) |
-| 1024 | 17.5 ms | 5.61 ms (**3.1×**) | 24.6 ms (0.71×) | 35.1 ms | 14.4 ms (**2.4×**) | 73.2 ms (0.48×) |
-| 4096 | 93.5 ms | 16.2 ms (**5.8×**) | 52.8 ms (**1.8×**) | 203 ms | 40.8 ms (**5.0×**) | 150 ms (**1.4×**) |
+| $N$ | acados | `cuda` | `cuda`, `precision='float32'` | `scan` (GPU) |
+|---:|---:|---:|---:|---:|
+| 16 | 0.15 ms | 1.78 ms (0.08×) | 1.61 ms (0.09×) | 10.1 ms (0.01×) |
+| 64 | 0.60 ms | 1.97 ms (0.30×) | 1.72 ms (0.35×) | 11.4 ms (0.05×) |
+| 256 | 2.80 ms | 2.89 ms (0.97×) | 2.52 ms (**1.1×**) | 16.0 ms (0.18×) |
+| 1024 | 14.5 ms | 5.29 ms (**2.7×**) | 4.52 ms (**3.2×**) | 24.1 ms (0.60×) |
+| 4096 | 94.3 ms | 15.9 ms (**5.9×**) | 14.3 ms (**6.6×**) | 52.2 ms (**1.8×**) |
+
+**Quadrotor NMPC**: one SQP iteration of the slung-load quadrotor from the hover guess (the same SQP iterate in both
+solvers).
+
+| $N$ | acados | `cuda` | `cuda`, `precision='float32'` | `scan` (GPU) |
+|---:|---:|---:|---:|---:|
+| 16 | 0.37 ms | 4.29 ms (0.09×) | 3.63 ms (0.10×) | 24.9 ms (0.01×) |
+| 64 | 1.82 ms | 5.59 ms (0.33×) | 4.59 ms (0.40×) | 32.5 ms (0.06×) |
+| 256 | 8.35 ms | 8.48 ms (0.98×) | 6.91 ms (**1.2×**) | 45.5 ms (0.18×) |
+| 1024 | 37.1 ms | 14.3 ms (**2.6×**) | 11.4 ms (**3.3×**) | 72.8 ms (0.51×) |
+| 4096 | 233 ms | 42.1 ms (**5.5×**) | 33.5 ms (**7.0×**) | 150 ms (**1.6×**) |
 
 In parentheses: acados' time divided by ParaMPC's (above 1: ParaMPC is faster).
 
-- **GPU, `cuda`**: faster than acados from $N \approx 300$ (296 linear, 307 quadrotor, interpolated), 5.8× / 5.0×
-  faster at $N = 4096$. From $N = 16$ to $4096$ its time grows 8–9×, acados' about 580×.
-- **GPU, `scan`** (XLA): faster than acados from $N \approx 1600$ (linear) and $2700$ (quadrotor). Its floor at
+- **GPU, `cuda`**: faster than acados from $N \approx 270$ (268 linear, 263 quadrotor, interpolated), 5.9× / 5.5×
+  faster at $N = 4096$. From $N = 16$ to $4096$ its time grows 9–10×, acados' about 630×.
+- **GPU, `cuda` with `precision='float32'`**: 10–20% less time than float64 at every horizon, with the same
+  iterations and the same solutions; faster than acados from $N \approx 220$ (224 / 207), 6.6× / 7.0× at
+  $N = 4096$.
+- **GPU, `scan`** (XLA): faster than acados from $N \approx 1700$ (linear) and $2200$ (quadrotor). Its floor at
   short horizons is kernel launches, which the single CUDA kernel removes.
-- **Short horizons**: acados is about 13× faster at $N = 16$; the kernel's floor is the latency of double-precision
-  arithmetic on a consumer GPU (about 0.25 ms per interior-point iteration).
-- **CPU**: acados is 4.8–15× faster than the `scan` backend and 3.6–10× faster than `sweep` at every horizon: without
+- **Short horizons**: acados is about 12× faster at $N = 16$ (10× against float32); the kernel's floor is the latency
+  of double-precision arithmetic on a consumer GPU (about 0.25 ms per interior-point iteration).
+- **CPU**: acados is 4.5–15× faster than the `scan` backend and 3.2–10× faster than `sweep` at every horizon: without
   parallel hardware the scan's extra work does not pay.
 - **Batches** (`examples/batch.py`): on `cuda`, 256 linear MPC QPs ($N = 32$) solved together take about 0.15 ms per
-  QP, 22× the throughput of one-at-a-time solves (3.3 ms each).
+  QP, 19× the throughput of one-at-a-time solves (2.7 ms each).
 
 Caveats: acados runs with its default settings on one core (partial condensing tuned to the horizon could make it
 faster); one consumer GPU with weak double precision (a data-centre GPU is untested); timings move by up to about 15%
-between sessions, so the crossovers are approximate; batches are not compared with several acados instances in
-parallel.
+between sessions, acados' included (its quadrotor times are 6% above the previous session's, its linear ones 7%
+below), so the crossovers are approximate; batches are not compared with several acados instances in parallel.
+
+### Real-time NMPC
+
+What a sampling period has to cover is the latency of one controller step.
+[`examples/quadrotor_nmpc.py`](examples/quadrotor_nmpc.py) runs the 20 s quadrotor closed loop ($N = 30$, wind gust,
+sensor noise) as a real-time controller would: one compiled step per sample, called from Python with the new
+measurement, the plant simulated outside the timing. On `cuda`, over 400 steps:
+
+| SQP iterations per step | precision | median | 95th percentile | max | tracking RMS |
+|---:|---|---:|---:|---:|---:|
+| 3 | float64 | 4.7 ms | 8.2 ms | 10.3 ms | 0.2141 m |
+| 3 | float32 | 4.3 ms | 7.5 ms | 9.4 ms | 0.2141 m |
+| 2 | float64 | 3.5 ms | 6.0 ms | 9.2 ms | 0.2201 m |
+| 2 | float32 | 3.2 ms | 5.5 ms | 8.6 ms | 0.2201 m |
+| 1 (RTI) | float64 | 1.9 ms | 3.3 ms | 5.7 ms | 0.2352 m |
+| 1 (RTI) | float32 | 1.7 ms | 3.0 ms | 4.8 ms | 0.2352 m |
+
+`python examples/quadrotor_nmpc.py --backend cuda --precision float32 --sqp-iters 1` reproduces a row. The worst steps
+are the ones whose QPs need the most interior-point iterations (up to 35 per step with 3 SQP iterations, during the
+start and the gust). Three SQP iterations per step took 5.9 ms median, 9.5 ms 95th percentile before the changes of
+2026-10-14 (a host callback after every solve, one thread block per stage, float64 only).
 
 ## Repository layout
 
@@ -307,7 +340,7 @@ src/
 tests/                       pytest suite
 notebooks/                   01 linear MPC, 02 nonlinear MPC, 03 verification
   benchmarking/              the benchmark against acados (notebook, worker, acados problem definitions)
-examples/                    runnable scripts (each takes --backend)
+examples/                    runnable scripts (each takes --backend and --precision)
 ```
 
 ## Tests

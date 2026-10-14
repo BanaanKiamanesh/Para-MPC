@@ -1,7 +1,9 @@
 """One benchmark measurement in a fresh process, so that its peak memory is its own and the compilation of one
 configuration cannot slow another:
 
-    python worker.py <linear|quadrotor> <acados|cuda|scan|sweep> <N> <repeats>
+    python worker.py <linear|quadrotor> <acados|cuda|cuda32|scan|sweep> <N> <repeats>
+
+cuda32 is the cuda backend with precision='float32' (a single-precision factorization while mu > 1e-5).
 
 The device comes from JAX_PLATFORMS. It prints one JSON line:
 
@@ -108,11 +110,11 @@ def linear_objective(sys_, x, u):
                  + 0.5 * e[-1] @ QN @ e[-1])
 
 
-def run_parampc_linear(N, backend, repeats, tol=1e-8):
+def run_parampc_linear(N, backend, repeats, tol=1e-8, precision='float64'):
     sys_ = lti_system()
     qp = linear_qp(sys_, N)
     t0 = time.perf_counter()
-    compiled = jax.jit(lambda qp: pm.solve_qp(qp, tol=tol, backend=backend)).lower(qp).compile()
+    compiled = jax.jit(lambda qp: pm.solve_qp(qp, tol=tol, backend=backend, precision=precision)).lower(qp).compile()
     sol = jax.block_until_ready(compiled(qp))
     setup = time.perf_counter() - t0
     t = median_time(lambda: jax.block_until_ready(compiled(qp)), repeats)
@@ -141,14 +143,14 @@ def run_acados_linear(N, repeats, tol=1e-8):
 
 
 # --------------------------------------------------------------------------------------------- quadrotor ---
-def quadrotor_controller(N, backend='auto'):
+def quadrotor_controller(N, backend='auto', precision='float64'):
     """The NMPC, cold-started: its QPs start from multipliers 1, floored at 1."""
-    return pm.NMPC(quad.ocp(N), backend=backend, warm_floor=1.0, **quad.NMPC_OPTIONS)
+    return pm.NMPC(quad.ocp(N), backend=backend, warm_floor=1.0, precision=precision, **quad.NMPC_OPTIONS)
 
 
-def run_parampc_quadrotor(N, backend, repeats):
+def run_parampc_quadrotor(N, backend, repeats, precision='float64'):
     """One SQP iteration from the hover initial guess."""
-    ctrl = quadrotor_controller(N, backend)
+    ctrl = quadrotor_controller(N, backend, precision)
     x0, SR = quad.initial_state(), quad.horizon_reference(0.0, N)
     state = ctrl.init(x0, SR)
     t0 = time.perf_counter()
@@ -190,6 +192,8 @@ RUNNERS = {('linear', 'acados'): lambda N, r: run_acados_linear(N, r),
 for _backend in pm.backends.BACKENDS:
     RUNNERS[('linear', _backend)] = lambda N, r, b=_backend: run_parampc_linear(N, b, r)
     RUNNERS[('quadrotor', _backend)] = lambda N, r, b=_backend: run_parampc_quadrotor(N, b, r)
+RUNNERS[('linear', 'cuda32')] = lambda N, r: run_parampc_linear(N, 'cuda', r, precision='float32')
+RUNNERS[('quadrotor', 'cuda32')] = lambda N, r: run_parampc_quadrotor(N, 'cuda', r, precision='float32')
 
 if __name__ == '__main__':
     problem, solver, N, repeats = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
