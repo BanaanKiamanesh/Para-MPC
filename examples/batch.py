@@ -6,7 +6,7 @@ iterations.
   2. Monte Carlo: 32 cart-pole swing-ups from different initial angles as one vmapped closed loop (each MPC step
      solves the 32 SQP subproblems together).
 
-    python examples/batch.py [--backend auto|cuda|scan|sweep]
+    python examples/batch.py [--backend auto|cuda|scan|sweep] [--precision float64|float32]
 """
 import argparse
 import time
@@ -20,7 +20,9 @@ from parampc.models import cartpole, linear
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--backend', default='auto')
+ap.add_argument('--precision', default='float64', choices=('float64', 'float32'))
 args = ap.parse_args()
+opts = dict(backend=args.backend, precision=args.precision)   # the QP solves
 print(f'backend {args.backend} (available: {pm.available_backends()})')
 
 
@@ -43,8 +45,8 @@ qp = pm.make_qp(A, B, Q=np.eye(n), R=0.1 * np.eye(m), N=N, x0=np.zeros(n), QN=10
 qp = pm.add_bounds(qp, u_min=-1.0, u_max=1.0, x_min=-5.0, x_max=5.0)
 x0s = jnp.asarray(2.0 * rng.normal(size=(256, n)) / np.sqrt(n))
 
-one = jax.jit(lambda x0: pm.solve_qp(qp.replace(x0=x0), backend=args.backend))
-many = jax.jit(jax.vmap(lambda x0: pm.solve_qp(qp.replace(x0=x0), backend=args.backend)))
+one = jax.jit(lambda x0: pm.solve_qp(qp.replace(x0=x0), **opts))
+many = jax.jit(jax.vmap(lambda x0: pm.solve_qp(qp.replace(x0=x0), **opts)))
 _, t1 = timed(one, x0s[0])
 print(f'linear MPC QP (n = {n}, m = {m}, N = {N}): one QP {1e3 * t1:.2f} ms')
 for Bn in (8, 32, 128, 256):
@@ -53,7 +55,7 @@ for Bn in (8, 32, 128, 256):
           f'one-by-one), {int(jnp.sum(out.status == 0))}/{Bn} solved, {int(out.iters.max())} IPM iterations')
 
 # 2. Monte Carlo over NMPC closed loops ----------------------------------------------------------------------------
-ctrl = pm.NMPC(cartpole.ocp(N=60), backend=args.backend, **cartpole.NMPC_OPTIONS)
+ctrl = pm.NMPC(cartpole.ocp(N=60), **opts, **cartpole.NMPC_OPTIONS)
 plant, K = cartpole.plant(), 160
 
 

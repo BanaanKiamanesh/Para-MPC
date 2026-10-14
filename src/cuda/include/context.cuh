@@ -19,3 +19,11 @@ struct Ctx {
   double* red;
   double* prof;                             // per-phase cycle counts (-DPM_PROFILE)
 };
+
+// An array of the value-function scan (Qt, St, Rt, T, T2) in the scalar type F of the factorization: double, or
+// float in the float32 phase (the workspace is carved in doubles, so a float array uses the first half of its
+// slot). What the solves read (W, Pm, Ls, Ldi, K, Acl, Fp, Ps, Tf, Tb) is double in both.
+template <typename F>
+__device__ __forceinline__ F* fa(double* p) {
+  return reinterpret_cast<F*>(p);
+}

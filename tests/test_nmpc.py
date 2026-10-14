@@ -40,6 +40,18 @@ def test_quadrotor_closed_loop(quad_ctrl):
     assert float(jnp.rad2deg(jnp.max(jnp.abs(xs[:, 3])))) < 10.5
 
 
+@pytest.mark.gpu
+def test_quadrotor_closed_loop_float32():
+    """precision='float32' on the CUDA kernel: the same closed loop (tracking RMS 0.2141 m)."""
+    ctrl = pm.NMPC(quad.ocp(N), backend='cuda', precision='float32', **quad.NMPC_OPTIONS)
+    params_fn = lambda k: quad.horizon_reference(k * quad.DT, N)
+    xs, us, _ = ctrl.closed_loop(quad.plant(400), quad.initial_state(), 400, params_fn=params_fn)
+    refs = jax.vmap(lambda k: quad.reference(k * quad.DT)[:2])(jnp.arange(400))
+    rms = float(jnp.sqrt(jnp.mean(jnp.sum((xs[:, :2] - refs) ** 2, axis=1))))
+    assert abs(rms - 0.21412) < 1e-4, rms
+    assert float(us.min()) >= -1e-9 and float(us.max()) <= quad.T_MAX + 1e-9
+
+
 def test_convexify_is_exact_noop_on_convex_costs():
     """The quadrotor's cost is convex: hessian='convexify' leaves its QPs unchanged, bit for bit (which is why its
     NMPC_OPTIONS skip the check with hessian='exact')."""

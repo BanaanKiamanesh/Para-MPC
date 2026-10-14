@@ -1,18 +1,20 @@
 """Python wrapper of the CUDA kernel (src/cuda): the whole interior-point solve on the GPU in one kernel launch.
 
-    ipm(data, z0, tol, mu_min, max_iter, start)   the contract of parampc.core.ipm with its default options;
-                                                  core.ipm(..., method='cuda') calls it
-    profile(data, z0, tol)                        where one solve spends its time, phase by phase
+    ipm(data, z0, tol, mu_min, max_iter, start, precision)   the contract of parampc.core.ipm with its default
+                                                             options; core.ipm(..., method='cuda') calls it
+    profile(data, z0, tol)                                   where one solve spends its time, phase by phase
 
-The kernel is compiled once per problem size (n states, m inputs) with the nvcc of the environment (the pip
-package nvidia-cuda-nvcc, or $NVCC), cached in ~/.cache/parampc ($PARAMPC_CACHE), loaded with ctypes and
+The kernel is compiled once per problem size (n states, m inputs) and precision with the nvcc of the environment
+(the pip package nvidia-cuda-nvcc, or $NVCC), cached in ~/.cache/parampc ($PARAMPC_CACHE), loaded with ctypes and
 registered as an XLA FFI target. The call is an ordinary XLA operation on XLA's stream, without copies: it works
-inside jax.jit, lax.scan and lax.while_loop.
+inside jax.jit, lax.scan and lax.while_loop. precision='float32' builds the library with -DPM_MIXED: two launches
+per solve, a float32 factorization while mu > mu_switch, then the float64 kernel.
 """
 import ctypes
 import functools
 import hashlib
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -71,21 +73,27 @@ def _cache_dir():
     raise RuntimeError('parampc: no writable cache directory for the CUDA kernel (set PARAMPC_CACHE)')
 
 
+PRECISIONS = ('float64', 'float32')
+
+
 @functools.cache
-def target(nx, nu, profile=False):
+def target(nx, nu, profile=False, precision='float64'):
     """Compile (if needed), load and register the kernel for n = nx states and m = nu inputs. Returns the FFI
     target's name and the library's workspace-size function. nvcc compiles src/ipm.cu, which includes the other
     sources (one translation unit); the cache key hashes every header and source."""
     import jax.ffi
+    if precision not in PRECISIONS:
+        raise ValueError(f'precision must be one of {PRECISIONS}, not {precision!r}')
+    mixed = precision == 'float32'
     root = source_dir()
     sources = sorted((root / 'include').glob('*.cuh')) + sorted((root / 'src').glob('*.cu'))
     arch = compute_capability()
-    digest = hashlib.sha1(f'{nx},{nu},{arch},{profile}'.encode())
+    digest = hashlib.sha1(f'{nx},{nu},{arch},{profile},{precision}'.encode())
     for path in sources:
         digest.update(path.read_bytes())
     tag = digest.hexdigest()[:10]
     build = _cache_dir()
-    stem = f'libparampc_ipm_n{nx}_m{nu}_sm{arch}{"_prof" if profile else ""}'
+    stem = f'libparampc_ipm_n{nx}_m{nu}_sm{arch}{"_f32" if mixed else ""}{"_prof" if profile else ""}'
     lib = os.path.join(build, f'{stem}_{tag}.so')
     if not os.path.exists(lib):
         tmp = f'{lib}.{os.getpid()}.tmp'
@@ -94,14 +102,17 @@ def target(nx, nu, profile=False):
                '-I', jax.ffi.include_dir(), '-I', str(root / 'include'), '-o', tmp, str(root / 'src' / 'ipm.cu')]
         if profile:
             cmd.append('-DPM_PROFILE')
+        if mixed:
+            cmd.append('-DPM_MIXED')
         proc = subprocess.run(cmd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise RuntimeError(f'parampc: nvcc failed for n={nx}, m={nu}:\n{proc.stderr[-4000:]}')
         os.replace(tmp, lib)
-        for old in os.listdir(build):                      # builds of earlier versions of the sources
-            if old.startswith(stem + '_') and old.endswith('.so') and old != os.path.basename(lib):
+        earlier = re.compile(re.escape(stem) + r'_[0-9a-f]{10}\.so')   # this variant, earlier sources
+        for old in os.listdir(build):
+            if earlier.fullmatch(old) and old != os.path.basename(lib):
                 os.remove(os.path.join(build, old))
-    name = f'parampc_ipm_n{nx}_m{nu}' + ('_prof' if profile else '')
+    name = f'parampc_ipm_n{nx}_m{nu}' + ('_f32' if mixed else '') + ('_prof' if profile else '')
     so = ctypes.cdll.LoadLibrary(lib)
     jax.ffi.register_ffi_target(name, jax.ffi.pycapsule(so.ParampcIpm), platform='CUDA')
     so.parampc_ipm_workspace.restype = ctypes.c_int64
@@ -109,14 +120,15 @@ def target(nx, nu, profile=False):
     return name, so.parampc_ipm_workspace
 
 
-def call(data, z0, tol, mu_min, max_iter, blocks=0, profile=False, start='given'):
+def call(data, z0, tol, mu_min, max_iter, blocks=0, profile=False, start='given', precision='float64',
+         mu_switch=1e-5):
     """The raw FFI call: (x, u, nu, lam, s, iterations, (best KKT score, final mu), workspace)."""
     N, nx, nu = data['B'].shape
     M = data['C'].shape[1]
     f64 = jnp.float64
-    name, workspace = target(nx, nu, profile)
+    name, workspace = target(nx, nu, profile, precision)
     prm = jnp.stack([jnp.asarray(tol, f64), jnp.asarray(mu_min, f64), jnp.asarray(max_iter, f64),
-                     jnp.asarray(1.0 if start == 'mehrotra' else 0.0, f64)])
+                     jnp.asarray(1.0 if start == 'mehrotra' else 0.0, f64), jnp.asarray(mu_switch, f64)])
     shapes = (jax.ShapeDtypeStruct((N + 1, nx), f64), jax.ShapeDtypeStruct((N, nu), f64),
               jax.ShapeDtypeStruct((N + 1, nx), f64), jax.ShapeDtypeStruct((N, M), f64),
               jax.ShapeDtypeStruct((N, M), f64), jax.ShapeDtypeStruct((), jnp.int32),
@@ -125,23 +137,28 @@ def call(data, z0, tol, mu_min, max_iter, blocks=0, profile=False, start='given'
     return jax.ffi.ffi_call(name, shapes)(*[jnp.asarray(a, f64) for a in args], blocks=np.int64(blocks))
 
 
-def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, start='given', blocks=0):
-    """parampc.core.ipm with the default options, on the GPU in one kernel launch.
+def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, start='given', blocks=0, precision='float64',
+        mu_switch=1e-5):
+    """parampc.core.ipm with the default options, on the GPU in one kernel launch (two with precision='float32').
     Returns (best iterate, iterations, its KKT score, final duality measure).
     start: 'given' (z0) or 'mehrotra' (Mehrotra's starting point from z0, counted as one iteration).
     blocks: thread blocks of the persistent kernel (0: one per stage up to 16 stages, one per two stages beyond,
-    up to what fits on the GPU)."""
+    up to what fits on the GPU).
+    precision, mu_switch: as in parampc.core.ipm (float32: the factorization in single precision while the
+    duality measure exceeds mu_switch)."""
     if start not in ('given', 'mehrotra'):
         raise ValueError(f"start must be 'given' or 'mehrotra', not {start!r}")
-    x, u, nu, lam, s, k, info, _ = call(data, z0, tol, mu_min, max_iter, blocks, False, start)
+    x, u, nu, lam, s, k, info, _ = call(data, z0, tol, mu_min, max_iter, blocks, False, start, precision, mu_switch)
     return dict(x=x, u=u, nu=nu, lam=lam, s=s), k, info[0], info[1]
 
 
-def profile(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, blocks=0):
+def profile(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, blocks=0, precision='float64', mu_switch=1e-5):
     """Share of one solve's time in each phase of the kernel (a -DPM_PROFILE build; one thread's clock, so a
     breakdown of the wall time, every phase ending with a grid barrier). Returns
-    ({phase: fraction}, cycles per IPM iteration, iterations)."""
-    out = jax.block_until_ready(jax.jit(lambda d, z: call(d, z, tol, mu_min, max_iter, blocks, True))(data, z0))
+    ({phase: fraction}, cycles per IPM iteration, iterations); with precision='float32', summed over both
+    phases."""
+    out = jax.block_until_ready(jax.jit(lambda d, z: call(d, z, tol, mu_min, max_iter, blocks, True, 'given',
+                                                          precision, mu_switch))(data, z0))
     prof, k = np.asarray(out[-1][-64:-32]), int(out[5])
     total = prof[:len(PHASES)].sum()
     return {p: float(v / total) for p, v in zip(PHASES, prof)}, float(total / max(k, 1)), k

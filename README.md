@@ -100,7 +100,7 @@ sols = jax.vmap(lambda x0: pm.solve_qp(qp.replace(x0=x0)))(x0s)   # a batch of Q
 ```
 
 `solve_qp(qp, warm=None, *, tol=1e-8, mu_min=1e-14, max_iter=50, backend='auto', start='given', floor=None,
-ipm_options=None)` returns a `Solution`:
+precision='float64', ipm_options=None)` returns a `Solution`:
 
 | field | shape | meaning |
 |---|---|---|
@@ -117,9 +117,16 @@ ipm_options=None)` returns a `Solution`:
   start). In a closed loop this saves a third to a half of the iterations.
 - **Stopping.** The IPM stops at KKT score ≤ `tol`, at duality measure ≤ `mu_min`, at `max_iter`, or on a non-finite
   step, and returns the most accurate iterate it has seen (past the attainable accuracy the iterates degrade).
+- **Precision.** `precision='float32'` factorizes in single precision while the duality measure is above
+  `ipm_options['mu_switch']` (default `1e-5`) and in double precision after it. The iterate, the residuals and the
+  solves stay in double precision, so the solution is as accurate as with `'float64'`, usually in the same number
+  of iterations. Far from the solution the barrier weights are moderate and single precision suffices; near it they
+  grow like $1/\mu$, which it cannot resolve (single precision throughout, `mu_switch=0`, does not reach a tolerance
+  of 1e-6 on the quadrotor QP). It pays on the `'cuda'` backend, where a consumer GPU's float32 arithmetic has about
+  a tenth of float64's latency; on `'scan'` and `'sweep'` it is the reference implementation.
 - **Options.** `start='mehrotra'` uses Mehrotra's starting-point heuristic (fewer iterations on cold starts of hard
   QPs). `ipm_options` reaches the core's settings (`n_corr` Gondzio correctors, `refine` refinement steps,
-  `refine_pred`, `combine`); the `'cuda'` backend implements the defaults only.
+  `refine_pred`, `combine`, `mu_switch`); the `'cuda'` backend implements the defaults (and `mu_switch`).
 - **Breakdowns.** A non-finite Newton step ends the solve with status 2. `pm.core.report_breakdowns()` also prints a
   message when that happens; it is off by default because it is a host callback, a device-host round trip after
   every solve (about 0.4 ms on the GPU, a fifth of a real-time MPC step). Call it before the first solve: compiled
@@ -172,8 +179,8 @@ slack (penalized by `soft_l1 s + soft_l2/2 s^2`, an exact penalty when `soft_l1`
 are `state.U[:, nu:]`). `terminal_constraints` are hard.
 
 **The controller.** `NMPC(ocp, sqp_iters=3, lm=0.5, merit_weight=500.0, ladder=(1, 0.5, 0.25, 0.125),
-qp_tol=1e-6, qp_max_iter=30, warm_floor=1e-3, backend='auto', hessian='convexify', ipm_options=None)`. Each SQP
-iteration:
+qp_tol=1e-6, qp_max_iter=30, warm_floor=1e-3, backend='auto', hessian='convexify', precision='float64',
+ipm_options=None)`. Each SQP iteration:
 
 1. linearizes the dynamics and constraints at the current point (JAX derivatives) and expands the costs to second
    order, plus a Levenberg–Marquardt term `lm` (the proximal term $\tfrac{lm}{2}\|z - z_k\|^2$);
@@ -200,7 +207,7 @@ non-convex cost $1-\cos\theta$). See [`notebooks/02_nonlinear_mpc.ipynb`](notebo
 
 | `backend` | what runs | use it for |
 |---|---|---|
-| `'cuda'` | the whole interior-point solve as one persistent CUDA kernel (fp64) | a GPU: long horizons and batches |
+| `'cuda'` | the whole interior-point solve as one persistent CUDA kernel (fp64, or fp32 in the early iterations) | a GPU: long horizons, batches, real-time loops |
 | `'scan'` | the associative scans, compiled by XLA | a GPU without nvcc; runs on the CPU too |
 | `'sweep'` | the sequential Riccati recursion inside the same IPM | the CPU, short horizons |
 | `'auto'` | `'cuda'` on a GPU with nvcc, else `'sweep'` on a CPU, else `'scan'` | the default |
@@ -315,8 +322,8 @@ JAX_PLATFORMS=cuda,cpu python -m pytest tests       # GPU: everything
 
 The suite certifies every backend's answer on an independent dense KKT system (box, terminal, time-varying
 coupled-row, semidefinite and $m > n$ problems), checks batches against individual solves, the quadrotor's optimum
-and closed loop, convexification, and the CUDA kernel (its factorization read directly from its workspace, its
-solutions against the JAX core, determinism).
+and closed loop, convexification, `precision='float32'`, and the CUDA kernel (its factorization read directly from
+its workspace, its solutions against the JAX core, determinism, in both precisions).
 
 ## Limitations
 

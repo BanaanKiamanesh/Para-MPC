@@ -114,6 +114,15 @@ def test_infeasible_is_not_solved():
     assert int(pm.solve_qp(qp, backend='sweep').status) != 0
 
 
+def test_float32_precision(backend):
+    """precision='float32' (a single-precision factorization in the early iterations) reaches the same optimum."""
+    qp = case('boxes')
+    a = pm.solve_qp(qp, backend=backend, tol=1e-10)
+    b = pm.solve_qp(qp, backend=backend, tol=1e-10, precision='float32')
+    assert int(b.status) == 0
+    assert abs(objective(qp, a) - objective(qp, b)) < 1e-8 * (1 + abs(objective(qp, a)))
+
+
 def test_ipm_options_pass_through():
     qp = case('boxes')
     a = pm.solve_qp(qp, backend='scan', tol=1e-10)

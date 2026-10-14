@@ -10,13 +10,15 @@ from .lq import factor_lq, solve_lq
 def factorize(data, z, method='scan', combine='auto', fac_dtype=None):
     """Matrix part of the Newton step at z: the barrier Hessians and `factor_lq`. fac_dtype='float32' runs
     `factor_lq` in single precision; the barrier Hessians and every solve stay in the iterate's precision, and
-    iterative refinement corrects the single-precision operator (an experiment: it cannot reach tight
-    tolerances on ill-conditioned problems)."""
+    iterative refinement corrects the single-precision operator. Throughout a solve it cannot reach tight
+    tolerances on ill-conditioned problems; `ipm` with precision='float32' uses it while the duality measure is
+    large."""
     lq = barrier_hessians(data, z)
     if fac_dtype is None:
         return dict(lq, **factor_lq(lq, data, method, combine))
     low = lambda t: {k: v.astype(fac_dtype) for k, v in t.items()}
-    fac = factor_lq(low(lq), low({'A': data['A'], 'B': data['B']}), method, combine)
+    with jax.default_matmul_precision('float32'):       # not TF32, the GPU's default for float32 products
+        fac = factor_lq(low(lq), low({'A': data['A'], 'B': data['B']}), method, combine)
     return dict(lq, **{k: v.astype(data['A'].dtype) for k, v in fac.items()})
 
 

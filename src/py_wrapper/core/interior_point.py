@@ -5,6 +5,11 @@ predictor (it only sets the centering parameter and the second-order term), the 
 correctors, whose sum is refined once against the system it solves. The loop runs on the device
 (`lax.while_loop`) and returns the most accurate iterate it has seen: near the limit of floating-point accuracy
 the barrier weights lam / s ~ 1 / mu become so large that a Newton step can make the iterate worse.
+
+precision='float32' factorizes in single precision while the duality measure is above mu_switch, and in double
+precision from there on. The iterate, the residuals and the solves stay double, and the refinement step corrects
+the single-precision operator. Far from the solution the barrier weights are moderate and the single-precision
+factorization costs no iterations; near it they reach 1 / mu, which single precision cannot resolve.
 """
 from functools import partial
 
@@ -16,6 +21,7 @@ from .kkt import kkt_score, mv
 from .newton import factorize, newton_direction, refine_step, solve_newton
 
 METHODS = ('scan', 'sweep', 'cuda')
+PRECISIONS = ('float64', 'float32')
 REPORT_BREAKDOWNS = False      # print a message after a non-finite Newton step (see report_breakdowns)
 
 
@@ -28,10 +34,11 @@ def initial_iterate(data, x, u, lam=1.0, floor=1.0):
                 lam=jnp.maximum(lam * jnp.ones_like(data['d']), floor), s=jnp.maximum(data['d'] - g, floor))
 
 
-def mehrotra_start(data, z, method='scan', combine='auto'):
+def mehrotra_start(data, z, method='scan', combine='auto', fac_dtype=None):
     """Mehrotra's starting-point heuristic: one affine-scaling Newton step from z, then s and lam shifted so that
     both are positive and their products balanced. Costs one factorization and one solve."""
-    zt = jax.tree.map(jnp.add, z, solve_newton(data, z, factorize(data, z, method, combine), 0.0, 0.0, method, 1))
+    fac = factorize(data, z, method, combine, fac_dtype)
+    zt = jax.tree.map(jnp.add, z, solve_newton(data, z, fac, 0.0, 0.0, method, 1))
     s = zt['s'] + jnp.maximum(-1.5 * jnp.min(zt['s']), 0.0)
     lam = zt['lam'] + jnp.maximum(-1.5 * jnp.min(zt['lam']), 0.0)
     ls = jnp.sum(lam * s)
@@ -97,9 +104,9 @@ def ipm_iteration(data, z, method='scan', refine=1, refine_pred=0, n_corr=1, com
                 nu=z['nu'] + ad * step['nu'], lam=z['lam'] + ad * step['lam'])
 
 
-@partial(jax.jit, static_argnames=('method', 'refine', 'refine_pred', 'n_corr', 'start', 'combine', 'fac_dtype'))
+@partial(jax.jit, static_argnames=('method', 'refine', 'refine_pred', 'n_corr', 'start', 'combine', 'precision'))
 def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, method='scan', refine=1, refine_pred=0, n_corr=1,
-        start='given', combine='auto', fac_dtype=None):
+        start='given', combine='auto', precision='float64', mu_switch=1e-5):
     """Iterate until the KKT score is <= tol, the duality measure is <= mu_min, or max_iter iterations.
 
     Returns (z, iterations, score): the most accurate iterate seen and its KKT score. A non-finite Newton step (a
@@ -107,36 +114,51 @@ def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, method='scan', refine=1, 
 
     method: 'scan' (associative scans), 'sweep' (Riccati recursion) or 'cuda' (the whole solve as one CUDA kernel,
     with the default options). start='mehrotra' replaces z0 by Mehrotra's starting point (counted as one
-    iteration). The other options are those of `ipm_iteration` and `factorize`."""
+    iteration). precision: 'float64', or 'float32': the factorization in single precision while the duality
+    measure exceeds mu_switch, in double precision from the first iteration that starts at mu <= mu_switch on
+    (module docstring; mu_switch = 0: single precision throughout, which cannot reach tight tolerances on
+    ill-conditioned QPs). The other options are those of `ipm_iteration`."""
+    if precision not in PRECISIONS:
+        raise ValueError(f'precision must be one of {PRECISIONS}, not {precision!r}')
     if method == 'cuda':
-        if (refine, refine_pred, n_corr, combine, fac_dtype) != (1, 0, 1, 'auto', None):
-            raise ValueError("method='cuda' implements the default options (and either start) only")
+        if (refine, refine_pred, n_corr, combine) != (1, 0, 1, 'auto'):
+            raise ValueError("method='cuda' implements the default options (with either start and precision) only")
         from .. import cuda
-        z, k, score, mu = cuda.ipm(data, z0, tol, mu_min, max_iter, start=start)
+        z, k, score, mu = cuda.ipm(data, z0, tol, mu_min, max_iter, start=start, precision=precision,
+                                   mu_switch=mu_switch)
         _report_breakdown(jnp.isfinite(mu), k, score)
         return z, k, score
     if method not in METHODS:
         raise ValueError(f'method must be one of {METHODS}, not {method!r}')
+    mixed = precision == 'float32'
+    duality = lambda z: jnp.mean(z['lam'] * z['s'])
+
+    def in_precision(step, low, z):           # step(fac_dtype)(z) with the factorization's precision
+        return lax.cond(low, step('float32'), step(None), z) if mixed else step(None)(z)
+
+    low = jnp.asarray(mixed) & (duality(z0) > mu_switch)                  # still in the single-precision phase
     k0 = 0
     if start == 'mehrotra':
-        z0, k0 = mehrotra_start(data, z0, method, combine), 1
+        z0, k0 = in_precision(lambda fd: lambda z: mehrotra_start(data, z, method, combine, fd), low, z0), 1
     elif start != 'given':
         raise ValueError(f"start must be 'given' or 'mehrotra', not {start!r}")
 
     def not_done(carry):
-        z, best, best_score, k = carry
-        return (k < max_iter) & (best_score > tol) & (jnp.mean(z['lam'] * z['s']) > mu_min)
+        z, best, best_score, k, low = carry
+        return (k < max_iter) & (best_score > tol) & (duality(z) > mu_min)
 
     def iterate(carry):
-        z, best, best_score, k = carry
-        z = ipm_iteration(data, z, method, refine, refine_pred, n_corr, combine, fac_dtype)
+        z, best, best_score, k, low = carry
+        low = low & (duality(z) > mu_switch)
+        z = in_precision(lambda fd: lambda z: ipm_iteration(data, z, method, refine, refine_pred, n_corr, combine,
+                                                            fd), low, z)
         score = kkt_score(data, z)
         better = score < best_score
         best = jax.tree.map(lambda new, old: jnp.where(better, new, old), z, best)
-        return z, best, jnp.where(better, score, best_score), k + 1
+        return z, best, jnp.where(better, score, best_score), k + 1, low
 
-    z, best, best_score, k = lax.while_loop(not_done, iterate, (z0, z0, kkt_score(data, z0), k0))
-    _report_breakdown(jnp.isfinite(jnp.mean(z['lam'] * z['s'])), k, best_score)
+    z, best, best_score, k, _ = lax.while_loop(not_done, iterate, (z0, z0, kkt_score(data, z0), k0, low))
+    _report_breakdown(jnp.isfinite(duality(z)), k, best_score)
     return best, k, best_score
 
 

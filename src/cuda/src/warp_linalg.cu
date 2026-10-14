@@ -14,12 +14,12 @@ __device__ double warp_reduce(double v, int op) {
   return __shfl_sync(FULL, v, 0);
 }
 
-template <int R, int K, int C, bool TA, bool TB>
-__device__ void mm(double* out, int ldo, const double* A, int lda, const double* B, int ldb, int lane,
-                   const double* add, int ldadd, double sign) {
+template <int R, int K, int C, bool TA, bool TB, typename F>
+__device__ void mm(F* out, int ldo, const F* A, int lda, const F* B, int ldb, int lane, const F* add, int ldadd,
+                   typename same_t<F>::type sign) {
   for (int e = lane; e < R * C; e += 32) {
     const int i = e / C, j = e % C;
-    double acc = 0.0;
+    F acc = 0;
 #pragma unroll
     for (int k = 0; k < K; ++k) acc += (TA ? A[k * lda + i] : A[i * lda + k]) * (TB ? B[j * ldb + k] : B[k * ldb + j]);
     out[i * ldo + j] = add ? add[i * ldadd + j] + sign * acc : sign * acc;
@@ -32,14 +32,14 @@ __device__ void mm(double* out, int ldo, const double* A, int lda, const double*
 // working copy wk: one barrier per column. The trailing updates only touch the entries (i, k) with 1 <= k <= i
 // (n(n-1)/2 of them, 28 for n = 8: one pass of the warp); each lane owns fixed entries for all columns, so there
 // is no per-column index arithmetic (which the compiler hoisted out of the IPM loop and kept in registers).
-template <int Nn, int G>
-__device__ void chol(double* L, double* dinv, const double* A, int lda, double* wk, int lane, unsigned gm) {
+template <int Nn, int G, typename F>
+__device__ void chol(F* L, F* dinv, const F* A, int lda, F* wk, int lane, unsigned gm) {
   for (int e = lane; e < Nn * Nn; e += G) {           // sym(A) via L, as A may alias wk
     const int i = e / Nn, j = e % Nn;
-    L[e] = i >= j ? 0.5 * (A[i * lda + j] + A[j * lda + i]) : 0.0;
+    L[e] = i >= j ? F(0.5) * (A[i * lda + j] + A[j * lda + i]) : F(0);
   }
   __syncwarp(gm);
-  for (int e = lane; e < Nn * Nn; e += G) { wk[e] = L[e]; L[e] = 0.0; }
+  for (int e = lane; e < Nn * Nn; e += G) { wk[e] = L[e]; L[e] = 0; }
   __syncwarp(gm);
   constexpr int TE = Nn * (Nn - 1) / 2, NQ = (TE + G - 1) / G;
   int ii[NQ > 0 ? NQ : 1], kk[NQ > 0 ? NQ : 1];
@@ -53,7 +53,7 @@ __device__ void chol(double* L, double* dinv, const double* A, int lda, double* 
   }
 #pragma unroll
   for (int j = 0; j < Nn; ++j) {                    // unrolled: the index arithmetic below is compile-time
-    const double v = wk[j * Nn + j], rinv = rsqrt(v);
+    const F v = wk[j * Nn + j], rinv = rsqrt(v);
     for (int i = j + lane; i < Nn; i += G) L[i * Nn + j] = i == j ? v * rinv : wk[i * Nn + j] * rinv;
     if (lane == 0) dinv[j] = rinv;
 #pragma unroll
@@ -66,11 +66,11 @@ __device__ void chol(double* L, double* dinv, const double* A, int lda, double* 
 }
 
 // each lane owns a column and substitutes forward (no barriers inside)
-template <int Nn, int G>
-__device__ void trsm_l(double* X, int ldx, const double* L, const double* dinv, const double* B, int ldb, int ncols,
-                       int lane, unsigned gm) {
+template <int Nn, int G, typename F, typename V>
+__device__ void trsm_l(V* X, int ldx, const F* L, const F* dinv, const V* B, int ldb, int ncols, int lane,
+                       unsigned gm) {
   for (int cc = lane; cc < ncols; cc += G) {
-    double x[Nn];
+    V x[Nn];
 #pragma unroll
     for (int i = 0; i < Nn; ++i) x[i] = B[i * ldb + cc];
 #pragma unroll
@@ -86,11 +86,11 @@ __device__ void trsm_l(double* X, int ldx, const double* L, const double* dinv, 
 }
 
 // each lane owns a column and substitutes backward
-template <int Nn, int G>
-__device__ void trsm_lt(double* X, int ldx, const double* L, const double* dinv, const double* B, int ldb, int ncols,
-                        int lane, unsigned gm) {
+template <int Nn, int G, typename F, typename V>
+__device__ void trsm_lt(V* X, int ldx, const F* L, const F* dinv, const V* B, int ldb, int ncols, int lane,
+                        unsigned gm) {
   for (int cc = lane; cc < ncols; cc += G) {
-    double x[Nn];
+    V x[Nn];
 #pragma unroll
     for (int i = 0; i < Nn; ++i) x[i] = B[i * ldb + cc];
 #pragma unroll
@@ -105,26 +105,27 @@ __device__ void trsm_lt(double* X, int ldx, const double* L, const double* dinv,
   __syncwarp(gm);
 }
 
-__device__ void lu_solve(double* Am, double* Bm, int ldb, int nc, int lane) {
+template <typename F>
+__device__ void lu_solve(F* Am, F* Bm, int ldb, int nc, int lane) {
   for (int k = 0; k < NX; ++k) {
-    double v = (lane >= k && lane < NX) ? fabs(Am[lane * NX + k]) : -1.0;
+    F v = (lane >= k && lane < NX) ? fabs(Am[lane * NX + k]) : F(-1);
     int idx = lane;
     for (int o = 16; o > 0; o >>= 1) {
-      const double v2 = __shfl_xor_sync(FULL, v, o);
+      const F v2 = __shfl_xor_sync(FULL, v, o);
       const int i2 = __shfl_xor_sync(FULL, idx, o);
       if (v2 > v || (v2 == v && i2 < idx)) { v = v2; idx = i2; }
     }
     const int piv = __shfl_sync(FULL, idx, 0);
     if (piv != k) {
       for (int j = lane; j < NX; j += 32) {
-        const double a = Am[k * NX + j]; Am[k * NX + j] = Am[piv * NX + j]; Am[piv * NX + j] = a;
+        const F a = Am[k * NX + j]; Am[k * NX + j] = Am[piv * NX + j]; Am[piv * NX + j] = a;
       }
       for (int j = lane; j < nc; j += 32) {
-        const double b = Bm[k * ldb + j]; Bm[k * ldb + j] = Bm[piv * ldb + j]; Bm[piv * ldb + j] = b;
+        const F b = Bm[k * ldb + j]; Bm[k * ldb + j] = Bm[piv * ldb + j]; Bm[piv * ldb + j] = b;
       }
     }
     __syncwarp();
-    const double akk = Am[k * NX + k];
+    const F akk = Am[k * NX + k];
     for (int i = k + 1 + lane; i < NX; i += 32) Am[i * NX + k] /= akk;
     __syncwarp();
     const int rest = NX - k - 1;
@@ -140,7 +141,7 @@ __device__ void lu_solve(double* Am, double* Bm, int ldb, int nc, int lane) {
   }
   for (int cc = lane; cc < nc; cc += 32)
     for (int i = NX - 1; i >= 0; --i) {
-      double v = Bm[i * ldb + cc];
+      F v = Bm[i * ldb + cc];
       for (int k = i + 1; k < NX; ++k) v -= Am[i * NX + k] * Bm[k * ldb + cc];
       Bm[i * ldb + cc] = v / Am[i * NX + i];
     }

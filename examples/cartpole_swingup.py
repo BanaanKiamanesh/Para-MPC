@@ -2,7 +2,7 @@
 |force| <= 15 N and the cart on a 3 m track. The cost 1 - cos(theta) is non-convex; hessian='convexify' (the
 default) keeps every SQP subproblem convex.
 
-    python examples/cartpole_swingup.py [--backend auto|cuda|scan|sweep] [--plot]
+    python examples/cartpole_swingup.py [--backend auto|cuda|scan|sweep] [--precision float64|float32] [--plot]
 """
 import argparse
 import time
@@ -16,10 +16,12 @@ from parampc.models import cartpole
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--backend', default='auto')
+ap.add_argument('--precision', default='float64', choices=('float64', 'float32'))
 ap.add_argument('--plot', action='store_true')
 args = ap.parse_args()
+opts = dict(backend=args.backend, precision=args.precision)   # the QP solves
 
-ctrl = pm.NMPC(cartpole.ocp(N=60), backend=args.backend, **cartpole.NMPC_OPTIONS)
+ctrl = pm.NMPC(cartpole.ocp(N=60), **opts, **cartpole.NMPC_OPTIONS)
 x0 = cartpole.hanging()
 state = ctrl.init(x0)                        # u = 0 rolled out: the pole stays down
 for _ in range(10):                          # 30 SQP iterations for the first plan

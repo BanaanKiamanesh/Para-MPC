@@ -92,16 +92,19 @@ class NMPC:
     """SQP-based nonlinear MPC for an OCP (module docstring). sqp_iters = 1 is the real-time iteration (RTI).
 
     lm: Levenberg-Marquardt weight; merit_weight and ladder: the line search; hessian: 'convexify' or 'exact';
-    backend, qp_tol, qp_max_iter, warm_floor and ipm_options: the QP solves (see `solve_qp`)."""
+    backend, qp_tol, qp_max_iter, warm_floor, precision ('float64' or 'float32') and ipm_options: the QP solves
+    (see `solve_qp`)."""
 
     def __init__(self, ocp, sqp_iters=3, lm=0.5, merit_weight=500.0, ladder=(1.0, 0.5, 0.25, 0.125), qp_tol=1e-6,
-                 qp_max_iter=30, warm_floor=1e-3, backend='auto', hessian='convexify', ipm_options=None):
+                 qp_max_iter=30, warm_floor=1e-3, backend='auto', hessian='convexify', precision='float64',
+                 ipm_options=None):
         if hessian not in ('convexify', 'exact'):
             raise ValueError("hessian must be 'convexify' or 'exact'")
         self.ocp, self.sqp_iters, self.lm, self.merit_weight = ocp, sqp_iters, lm, merit_weight
         self.convexify = hessian == 'convexify'
         self.ladder = jnp.asarray(ladder, jnp.float64)
-        self.qp_opts = dict(tol=qp_tol, max_iter=qp_max_iter, backend=backend, ipm_options=ipm_options)
+        self.qp_opts = dict(tol=qp_tol, max_iter=qp_max_iter, backend=backend, precision=precision,
+                            ipm_options=ipm_options)
         self.warm_floor = warm_floor
         nx, nu, ns = ocp.nx, ocp.nu, ocp.ns
         self.nv = nu + ns

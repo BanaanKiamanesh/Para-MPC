@@ -1,5 +1,7 @@
 // Host side of the kernel: workspace layout, launch configuration, and the XLA FFI handler `ParampcIpm` that
-// parampc/cuda.py registers with jax.ffi (loaded with ctypes), plus the workspace size for the caller.
+// parampc/cuda.py registers with jax.ffi (loaded with ctypes), plus the workspace size for the caller. A default
+// build launches the float64 kernel; a -DPM_MIXED build (precision='float32') launches the float32 phase and then
+// the float64 phase, on the same stream and workspace.
 #include <cuda_runtime.h>
 
 #include <cmath>
@@ -15,6 +17,14 @@
 namespace ffi = xla::ffi;
 
 namespace {
+
+#ifdef PM_MIXED
+void (*const kernels[])(Ctx) = {ipm_kernel<float, 1>, ipm_kernel<double, 2>};
+constexpr int NPRM = 5;                           // (tol, mu_min, max_iter, start, mu_switch)
+#else
+void (*const kernels[])(Ctx) = {ipm_kernel<double, 0>};
+constexpr int NPRM = 4;                           // (tol, mu_min, max_iter, start)
+#endif
 
 size_t carve(Ctx& c, double* base, int N, int M, int P, int maxwarps) {
   const size_t E = N + 1;
@@ -79,11 +89,16 @@ ffi::Error configure(Launch& lc, int M) {
   while (lc.wpb > 1 && per_warp * lc.wpb > cap) lc.wpb /= 2;
   if (per_warp * lc.wpb > cap) return ffi::Error::InvalidArgument("state dimension too large for shared memory");
   lc.smem = per_warp * lc.wpb;
-  if (cudaFuncSetAttribute(ipm_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lc.smem) != cudaSuccess)
-    return ffi::Error::Internal("cudaFuncSetAttribute failed");
-  if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&lc.per_sm, ipm_kernel, lc.wpb * 32, lc.smem) != cudaSuccess ||
-      lc.per_sm < 1)
-    return ffi::Error::Internal("the kernel does not fit on a multiprocessor");
+  lc.per_sm = 1 << 30;
+  for (auto kern : kernels) {                     // a cooperative grid must fit every kernel it is launched with
+    int per_sm = 0;
+    if (cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)lc.smem) != cudaSuccess)
+      return ffi::Error::Internal("cudaFuncSetAttribute failed");
+    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm, kern, lc.wpb * 32, lc.smem) != cudaSuccess ||
+        per_sm < 1)
+      return ffi::Error::Internal("the kernel does not fit on a multiprocessor");
+    if (per_sm < lc.per_sm) lc.per_sm = per_sm;
+  }
   lc.sms = prop.multiProcessorCount;
   return ffi::Error::Success();
 }
@@ -107,7 +122,8 @@ static ffi::Error IpmImpl(cudaStream_t stream,
     return ffi::Error::InvalidArgument("parampc_ipm: data shapes do not match the compiled sizes (NX, NU)");
   const int N = (int)Ad[0], M = (int)Cd[1];
   if (N < 1 || M < 1) return ffi::Error::InvalidArgument("parampc_ipm: needs N >= 1 and at least one inequality row");
-  if (prm.element_count() < 4) return ffi::Error::InvalidArgument("parampc_ipm: prm = (tol, mu_min, max_iter, start)");
+  if (prm.element_count() < NPRM)
+    return ffi::Error::InvalidArgument("parampc_ipm: prm = (tol, mu_min, max_iter, start[, mu_switch])");
 
   static Launch lc;
   static int lc_M = -1;
@@ -162,8 +178,10 @@ static ffi::Error IpmImpl(cudaStream_t stream,
     cudaMemcpyAsync(cp.dst2, cp.src, cp.n * sizeof(double), cudaMemcpyDeviceToDevice, stream);
   }
   void* args[] = {&c};
-  cudaError_t st = cudaLaunchCooperativeKernel((void*)ipm_kernel, dim3(G), dim3(lc.wpb * 32), args, lc.smem, stream);
-  if (st != cudaSuccess) return ffi::Error::Internal(std::string("parampc_ipm launch: ") + cudaGetErrorString(st));
+  for (auto kern : kernels) {
+    cudaError_t st = cudaLaunchCooperativeKernel((void*)kern, dim3(G), dim3(lc.wpb * 32), args, lc.smem, stream);
+    if (st != cudaSuccess) return ffi::Error::Internal(std::string("parampc_ipm launch: ") + cudaGetErrorString(st));
+  }
   return ffi::Error::Success();
 }
 
@@ -189,7 +207,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(ParampcIpm, IpmImpl,
                                   .Arg<ffi::Buffer<ffi::F64>>()   // nu0
                                   .Arg<ffi::Buffer<ffi::F64>>()   // lam0
                                   .Arg<ffi::Buffer<ffi::F64>>()   // s0
-                                  .Arg<ffi::Buffer<ffi::F64>>()   // (tol, mu_min, max_iter, start: 0 given, 1 Mehrotra)
+                                  .Arg<ffi::Buffer<ffi::F64>>()   // (tol, mu_min, max_iter, start, mu_switch)
                                   .Ret<ffi::Buffer<ffi::F64>>()   // x
                                   .Ret<ffi::Buffer<ffi::F64>>()   // u
                                   .Ret<ffi::Buffer<ffi::F64>>()   // nu

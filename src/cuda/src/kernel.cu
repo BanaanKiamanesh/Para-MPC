@@ -21,7 +21,14 @@
 //                   iteration do matrix-vector work only.
 //   linear algebra  one warp per combine, its lanes over matrix entries; one warp per stage, or SPW stages
 //                   per warp (GP lanes each) when there are more stages than warps; matrices in shared
-//                   memory; float64 throughout; sizes NX, NU fixed at compile time (-DPM_NX, -DPM_NU).
+//                   memory; sizes NX, NU fixed at compile time (-DPM_NX, -DPM_NU).
+//   precision       F is the scalar type of the value-function scan and the gains; what the solves read (P,
+//                   the gains, the closed loop, the chunk matrices) is stored in float64, and the iterate, the
+//                   residuals and the solves are float64 in every mode. MODE 0: the whole solve with F = double. With
+//                   precision='float32' (-DPM_MIXED) two launches share the workspace: MODE 1 (F = float) iterates
+//                   while mu > mu_switch, MODE 2 (F = double) continues from its iterate, iteration count and best
+//                   iterate, as parampc.core.ipm with precision='float32'. Separate kernels, so that each keeps one
+//                   copy of the factorization and its own register allocation.
 //
 // The host side (launch configuration, workspace, the XLA FFI handler) is in ffi.cu.
 #include "kernel.cuh"
@@ -50,6 +57,7 @@
 // kernel sits near the 255-register limit. Two things keep it there without spills: the launch bound states
 // one block per multiprocessor (else ptxas may aim at 128 registers and spill kilobytes), and the phase lambdas
 // are always inlined (else `c` is copied to local memory and every pointer load goes through it).
+template <typename F, int MODE>
 __global__ void __launch_bounds__(PM_THREADS, 1) ipm_kernel(Ctx c) {
   cg::grid_group grid = cg::this_grid();
   extern __shared__ double smem[];
@@ -62,7 +70,7 @@ __global__ void __launch_bounds__(PM_THREADS, 1) ipm_kernel(Ctx c) {
   const double NM = (double)c.N * c.M;
 #ifdef PM_PROFILE
   long long t0 = clock64();
-  if (gw == 0) for (int i = lane; i < 64; i += 32) c.prof[i] = 0.0;
+  if (MODE != 2 && gw == 0) for (int i = lane; i < 64; i += 32) c.prof[i] = 0.0;   // MODE 2 adds to MODE 1's
 #endif
   // per-stage phases: one stage per warp, or SPW stages per warp (GP lanes each) when there are more stages
   // than warps; stages(last, f) calls f(t, lanes, shared memory) for t = 0..last
@@ -124,7 +132,7 @@ __global__ void __launch_bounds__(PM_THREADS, 1) ipm_kernel(Ctx c) {
   };
 
   auto build_phase = [&]() __attribute__((always_inline)) {
-    stages(c.N, [&](int t, auto ln, double* w) __attribute__((always_inline)) { task_build(c, t, ln, w); });
+    stages(c.N, [&](int t, auto ln, double* w) __attribute__((always_inline)) { task_build<F>(c, t, ln, w); });
     bar(grid);
   };
 
@@ -132,7 +140,14 @@ __global__ void __launch_bounds__(PM_THREADS, 1) ipm_kernel(Ctx c) {
   residual_phase(best_score, mu);
   const bool mehrotra = c.prm[3] != 0.0;
   int k = 0;
-  while ((mehrotra && k == 0) || (k < max_iter && best_score > tol && mu > mu_min)) {
+  double mu_switch = 0.0;
+  if constexpr (MODE == 1) mu_switch = c.prm[4];
+  if constexpr (MODE == 2) {                                   // resume where the float32 phase stopped
+    k = *c.kout;
+    best_score = c.info[0];
+  }
+  while ((MODE != 1 || mu > mu_switch) &&
+         ((mehrotra && k == 0) || (k < max_iter && best_score > tol && mu > mu_min))) {
     // With start = Mehrotra, the first iteration computes Mehrotra's starting point instead (counted as one
     // iteration, as core.mehrotra_start): the refined affine-scaling step at tau = 0, taken in full, then s and
     // lam shifted positive and balanced.
@@ -146,7 +161,7 @@ __global__ void __launch_bounds__(PM_THREADS, 1) ipm_kernel(Ctx c) {
       build_phase();
       MARK(1);
       double bad = 0.0;
-      factor(c, grid, gw, TW, lane, ws, lu, bad);
+      factor<F>(c, grid, gw, TW, lane, ws, lu, bad);
       MARK(2);
       for (int task = gw; task < 2 * c.P; task += TW) task_chunk(c, task, lane);
       put(c, gw, lane, 2, bad, MAX);

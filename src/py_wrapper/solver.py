@@ -134,14 +134,14 @@ def split_solution(qps, sol):
 
 # ----------------------------------------------------------------------- solve ---
 @functools.lru_cache(maxsize=None)
-def _solver(tol, mu_min, max_iter, method, start, floor, ipm_options):
+def _solver(tol, mu_min, max_iter, method, start, floor, precision, ipm_options):
     opts = dict(ipm_options)
 
     def solve_one(qp, warm):
         data = to_core(qp)
         z0 = starting_point(qp, data, warm, floor)
         z, k, score = core.ipm(data, z0, tol=tol, mu_min=mu_min, max_iter=max_iter, method=method, start=start,
-                               **opts)
+                               precision=precision, **opts)
         return from_core(qp, z, k, score, tol, max_iter)
 
     @jax.custom_batching.custom_vmap
@@ -166,20 +166,25 @@ def _solver(tol, mu_min, max_iter, method, start, floor, ipm_options):
 
 
 def solve_qp(qp, warm=None, *, tol=1e-8, mu_min=1e-14, max_iter=50, backend='auto', start='given', floor=None,
-             ipm_options=None):
+             precision='float64', ipm_options=None):
     """Solve an OCPQP. Returns a Solution.
 
     warm: a Solution of a similar QP (e.g. the previous MPC step's, `sol.shift()`): its x, u and multipliers start
         the IPM, the multipliers and slacks floored at `floor` (default 1e-3 with a warm start, 1 without).
     start: 'given' or 'mehrotra' (Mehrotra's starting-point heuristic: fewer iterations on cold starts of hard QPs).
+    precision: 'float64', or 'float32': the factorization in single precision while the duality measure is above
+        ipm_options['mu_switch'] (default 1e-5), then in double precision; the iterate, the residuals and the solves
+        stay double, so the solution has the float64 accuracy. Faster on the 'cuda' backend (a consumer GPU's
+        float32 arithmetic has a tenth of float64's latency); on 'scan' and 'sweep' it is the reference
+        implementation.
     The IPM stops at KKT score <= tol, at duality measure <= mu_min (past the attainable accuracy the iterates
     degrade; the best one is returned), at max_iter, or on a non-finite step. Infeasibility is not detected: an
     infeasible QP ends with status 2 or 1.
-    ipm_options: advanced settings of the IPM (parampc.core.ipm: n_corr, refine, refine_pred, combine, fac_dtype);
-        the 'cuda' backend supports only the defaults.
+    ipm_options: advanced settings of the IPM (parampc.core.ipm: n_corr, refine, refine_pred, combine, mu_switch);
+        the 'cuda' backend supports only the defaults and mu_switch.
     Under jax.vmap a batch is solved as one long horizon on 'scan' and 'cuda' (module docstring)."""
     if floor is None:
         floor = 1.0 if warm is None else 1e-3
     opts = tuple(sorted((ipm_options or {}).items()))
     return _solver(float(tol), float(mu_min), int(max_iter), resolve_backend(backend), start, float(floor),
-                   opts)(qp, warm)
+                   precision, opts)(qp, warm)

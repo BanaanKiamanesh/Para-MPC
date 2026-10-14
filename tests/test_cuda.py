@@ -21,11 +21,12 @@ def p_offset(N, M, n, m):
     return sum((s + 31) // 32 * 32 for s in sizes)
 
 
-def kernel_P(data, z0):
-    """P_t of the kernel's factorization at z0 (one IPM iteration, so its only factorization is at z0)."""
+def kernel_P(data, z0, precision='float64'):
+    """P_t of the kernel's factorization at z0 (one IPM iteration, so its only factorization is at z0; with
+    precision='float32' it is the float32 phase's, stored in double)."""
     N, n, m = data['B'].shape
     M = data['C'].shape[1]
-    out = jax.jit(lambda d, z: cuda.call(d, z, 1e-8, 1e-12, 1))(data, z0)
+    out = jax.jit(lambda d, z: cuda.call(d, z, 1e-8, 1e-12, 1, precision=precision))(data, z0)
     ws = np.asarray(out[-1])
     off = p_offset(N, M, n, m)
     return ws[off:off + (N + 1) * n * n].reshape(N + 1, n, n)
@@ -54,12 +55,13 @@ def test_solve_matches_jax(N):
         np.testing.assert_allclose(zc[key], zs[key], atol=1e-6)
 
 
-def test_deterministic():
+@pytest.mark.parametrize('precision', ['float64', 'float32'])
+def test_deterministic(precision):
     """Fixed reduction order: bit-identical results run to run (also on the LU fallback of a semidefinite cost)."""
     data, z0 = testing.random_problem(300, 4, 2, 6, seed=3)
     c = np.ones((1, 4)) / 2.0
     semi = dict(data, Q=jnp.broadcast_to(jnp.asarray(c.T @ c), data['Q'].shape), QN=jnp.zeros((4, 4)))
-    run = jax.jit(lambda d, z: core.ipm(d, z, tol=1e-10, method='cuda'))
+    run = jax.jit(lambda d, z: core.ipm(d, z, tol=1e-10, method='cuda', precision=precision))
     for d in (data, semi):
         outs = [jax.tree.map(np.asarray, run(d, z0)) for _ in range(4)]
         for o in outs[1:]:
@@ -81,3 +83,40 @@ def test_nondefault_options_are_rejected():
     data, z0 = testing.random_problem(8, 2, 1, 2)
     with pytest.raises(ValueError):
         core.ipm(data, z0, method='cuda', n_corr=0)
+
+
+@pytest.mark.parametrize('n,m', [(4, 2), (3, 7)])
+@pytest.mark.parametrize('N', [5, 200])
+def test_float32_factorization(n, m, N):
+    """The float32 phase's P_t (computed in single precision, stored in double) against the float64 one: single
+    precision accuracy, at m > n too."""
+    data, z0 = testing.random_problem(N, n, m, 2 * m + 2, seed=N)
+    P64, P32 = kernel_P(data, z0), kernel_P(data, z0, 'float32')
+    assert np.all(np.isfinite(P32))
+    err = np.max(np.abs(P32 - P64)) / np.max(np.abs(P64))
+    assert 1e-12 < err < 1e-4, err                                  # really single precision, and accurate
+
+
+@pytest.mark.parametrize('N', [3, 64, 600])
+def test_float32_phase_matches_jax(N):
+    """precision='float32': the kernel against the JAX reference with the same switch."""
+    data, z0 = testing.random_problem(N, 4, 2, 6, seed=N + 1)
+    zc, kc, sc = core.ipm(data, z0, tol=1e-8, method='cuda', precision='float32')
+    zs, ks, ss = core.ipm(data, z0, tol=1e-8, method='scan', precision='float32')
+    assert float(core.kkt_score(data, zc)) <= 1e-8 and float(ss) <= 1e-8, (float(sc), float(ss))
+    assert abs(int(kc) - int(ks)) <= 1, (int(kc), int(ks))
+    for key in ('x', 'u'):
+        np.testing.assert_allclose(zc[key], zs[key], atol=1e-6)
+
+
+@pytest.mark.parametrize('start', ['given', 'mehrotra'])
+def test_float32_handoff_is_exact(start):
+    """With mu_switch above every duality measure the float32 launch stops at once and the float64 launch does the
+    whole solve: bit-identical to precision='float64', so the second launch resumes exactly."""
+    data, z0 = testing.random_problem(64, 4, 2, 6, seed=2)
+    a = jax.tree.map(np.asarray, core.ipm(data, z0, tol=1e-8, method='cuda', start=start))
+    b = jax.tree.map(np.asarray, core.ipm(data, z0, tol=1e-8, method='cuda', start=start, precision='float32',
+                                          mu_switch=1e300))
+    for key in ('x', 'u', 'nu', 'lam', 's'):
+        np.testing.assert_array_equal(a[0][key], b[0][key])
+    assert a[1] == b[1] and a[2] == b[2]

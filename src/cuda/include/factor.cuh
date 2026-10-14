@@ -5,13 +5,16 @@
 #include "context.cuh"
 
 // barrier-augmented stage data of stage t (W, Qt, St, Rt) and its element (Abar, M, Qbar) of the
-// value-function scan, in c.T
-template <int G>
+// value-function scan, in c.T. F: the scalar type of the factorization (double, or float in the float32 phase);
+// W is double in both.
+template <typename F, int G>
 __device__ __forceinline__ void task_build(const Ctx& c, int t, Lanes<G> ln, double* ws);
 
 // P_t for every stage (c.Pm) by the scan over the elements in c.T, and the gains of every stage: the Cholesky
 // factor of Sigma_t (c.Ls, c.Ldi), K_t and Acl_t = A_t - B_t K_t. lu: LU combines instead of the Cholesky form;
-// bad is set to 1 if a P_t is not finite. Every level of the scan ends with a grid barrier.
+// bad is set to 1 if a P_t is not finite. Every level of the scan ends with a grid barrier. F: the arithmetic and
+// the scan's elements; P and the gains are stored in double for the solves.
+template <typename F>
 __device__ __forceinline__ void factor(const Ctx& c, cg::grid_group& grid, int gw, int TW, int lane, double* ws,
                                        bool lu, double& bad);
 

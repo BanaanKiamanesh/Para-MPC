@@ -111,6 +111,38 @@ def test_cholesky_ok():
     assert not bool(core.cholesky_ok(dict(data, QN=jnp.zeros((4, 4)))))
 
 
+@pytest.mark.parametrize('start', ['given', 'mehrotra'])
+def test_float32_phase_reaches_the_certified_optimum(start):
+    """precision='float32': a single-precision factorization while mu > mu_switch, double precision after. The
+    iterate and the solves stay double, so the solution is certified like a float64 one, in at most one extra
+    iteration."""
+    data, z0 = testing.random_problem(64, 4, 2, 8, seed=3, u_max=0.05, x_max=0.5)
+    z64, k64, _ = core.ipm(data, z0, tol=1e-10, start=start)
+    z32, k32, score = core.ipm(data, z0, tol=1e-10, start=start, precision='float32')
+    assert float(score) <= 1e-10 and int(k32) <= int(k64) + 1, (int(k32), int(k64))
+    cert = testing.kkt_certificate(testing.dense_qp(data), z32)
+    assert max(cert[key] for key in ('stationarity', 'equality', 'inequality', 'complementarity')) < 1e-8
+    obj = testing.objective(data, z64)
+    assert abs(testing.objective(data, z32) - obj) < 1e-9 * (1 + abs(obj))
+
+
+def test_float32_phase_with_lu_fallback():
+    """A semidefinite cost in the float32 phase: the single-precision Cholesky combine fails and the scan is redone
+    with LU combines in single precision; the IPM still reaches the certified optimum."""
+    data, z0 = testing.random_problem(32, 4, 2, 4, seed=5)
+    cc = jnp.outer(jnp.eye(4)[0], jnp.eye(4)[0])
+    data = dict(data, Q=jnp.broadcast_to(cc, data['Q'].shape), QN=cc)
+    z, k, score = core.ipm(data, z0, tol=1e-10, precision='float32')
+    cert = testing.kkt_certificate(data, z)
+    assert max(cert[key] for key in ('stationarity', 'equality', 'inequality', 'complementarity')) < 1e-8
+
+
+def test_unknown_precision_is_rejected():
+    data, z0 = testing.random_problem(8, 2, 1, 2)
+    with pytest.raises(ValueError):
+        core.ipm(data, z0, precision='float16')
+
+
 def test_breakdown_message_is_opt_in(capsys):
     """The message after a non-finite step is a host callback after every solve: off unless report_breakdowns()."""
     data, z0 = testing.random_problem(8, 2, 1, 2, seed=4)
