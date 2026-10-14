@@ -129,7 +129,8 @@ def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, start='given', blocks=0):
     """parampc.core.ipm with the default options, on the GPU in one kernel launch.
     Returns (best iterate, iterations, its KKT score, final duality measure).
     start: 'given' (z0) or 'mehrotra' (Mehrotra's starting point from z0, counted as one iteration).
-    blocks: thread blocks of the persistent kernel (0: one per stage, up to what fits on the GPU)."""
+    blocks: thread blocks of the persistent kernel (0: one per stage up to 16 stages, one per two stages beyond,
+    up to what fits on the GPU)."""
     if start not in ('given', 'mehrotra'):
         raise ValueError(f"start must be 'given' or 'mehrotra', not {start!r}")
     x, u, nu, lam, s, k, info, _ = call(data, z0, tol, mu_min, max_iter, blocks, False, start)

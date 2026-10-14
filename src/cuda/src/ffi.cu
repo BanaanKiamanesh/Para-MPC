@@ -124,7 +124,12 @@ static ffi::Error IpmImpl(cudaStream_t stream,
   while ((1 << H) < N + 1) ++H;
   const int gmax = lc.sms * lc.per_sm;
   int G = (int)blocks;
-  if (G <= 0) G = N + 1;                           // auto: as many blocks as elements, up to what fits
+  // auto: one block per element up to 16 elements, one per two elements beyond, up to what fits. Fewer blocks make
+  // the ~30 grid barriers of an iteration cheaper, at the price of two combines per multiprocessor sharing its two
+  // fp64 units: at N = 30 (quadrotor QP, RTX 3070 Laptop) 6% fewer cycles per iteration than one block per element
+  // (10% with precision='float32', whose combines do not use the fp64 units), 1.5-4% at N = 20-64, none from
+  // N = 100; at N = 10 one block per element was 2% faster.
+  if (G <= 0) G = N + 1 <= 16 ? N + 1 : (N + 2) / 2;
   if (G > gmax) G = gmax;
   if (G < 1) G = 1;
 
