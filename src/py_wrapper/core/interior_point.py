@@ -16,6 +16,7 @@ from .kkt import kkt_score, mv
 from .newton import factorize, newton_direction, refine_step, solve_newton
 
 METHODS = ('scan', 'sweep', 'cuda')
+REPORT_BREAKDOWNS = False      # print a message after a non-finite Newton step (see report_breakdowns)
 
 
 def initial_iterate(data, x, u, lam=1.0, floor=1.0):
@@ -102,7 +103,7 @@ def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, method='scan', refine=1, 
     """Iterate until the KKT score is <= tol, the duality measure is <= mu_min, or max_iter iterations.
 
     Returns (z, iterations, score): the most accurate iterate seen and its KKT score. A non-finite Newton step (a
-    breakdown) also ends the loop, and a message says so.
+    breakdown) also ends the loop (with `report_breakdowns()`, a message says so).
 
     method: 'scan' (associative scans), 'sweep' (Riccati recursion) or 'cuda' (the whole solve as one CUDA kernel,
     with the default options). start='mehrotra' replaces z0 by Mehrotra's starting point (counted as one
@@ -139,9 +140,21 @@ def ipm(data, z0, tol=1e-8, mu_min=1e-12, max_iter=30, method='scan', refine=1, 
     return best, k, best_score
 
 
+def report_breakdowns(on=True):
+    """Print a message after every solve that ended on a non-finite Newton step (off by default). The message is a
+    host callback, a device-host round trip after every solve (about 0.4 ms on the GPU, a fifth of a real-time MPC
+    step), so it is off unless asked for; a breakdown shows in the solution's status (2) either way. Solves that
+    are already compiled keep the setting they were traced with."""
+    global REPORT_BREAKDOWNS
+    REPORT_BREAKDOWNS = bool(on)
+
+
 def _report_breakdown(finite, k, score):
-    """Print a message after a non-finite Newton step. A host callback, not a lax.cond around jax.debug.print:
-    under jax.vmap a cond runs both branches, which would print the message for every QP of a batch."""
+    """The message of `report_breakdowns`. A host callback, not a lax.cond around jax.debug.print: under jax.vmap
+    a cond runs both branches, which would print the message for every QP of a batch."""
+    if not REPORT_BREAKDOWNS:
+        return
+
     def warn(finite, k, score):
         if not finite:
             print(f'parampc: non-finite Newton step at iteration {int(k)}; returning the best iterate '

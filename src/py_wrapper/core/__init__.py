@@ -17,7 +17,15 @@ Problem data (a dict of arrays; N stages, n states, m inputs, M >= 1 inequality 
 
 Iterate (a dict): x (N+1,n), u (N,m), nu (N+1,n), lam (N,M), s (N,M).
 """
-from .interior_point import centrality_correctors, initial_iterate, ipm, ipm_iteration, mehrotra_start, step_to_boundary
+from .interior_point import (
+    centrality_correctors,
+    initial_iterate,
+    ipm,
+    ipm_iteration,
+    mehrotra_start,
+    report_breakdowns,
+    step_to_boundary,
+)
 from .kkt import barrier_hessians, kkt_score, lq_rhs, mtv, mv, residuals, sym
 from .lq import (
     affine_combine,
@@ -35,6 +43,7 @@ from .newton import factorize, newton_direction, newton_step, refine_step, solve
 
 __all__ = ['affine_combine', 'affine_recursion', 'barrier_hessians', 'centrality_correctors', 'cholesky_ok',
            'factor_lq', 'factorize', 'initial_iterate', 'ipm', 'ipm_iteration', 'kkt_score', 'lq_rhs',
-           'mehrotra_start', 'mtv', 'mv', 'newton_direction', 'newton_step', 'refine_step', 'residuals',
+           'mehrotra_start', 'mtv', 'mv', 'newton_direction', 'newton_step', 'refine_step', 'report_breakdowns',
+           'residuals',
            'riccati_scan', 'riccati_sweep', 'solve_lq', 'solve_newton', 'stage_elements', 'step_to_boundary', 'sym',
            'vf_combine', 'vf_combine_lu']

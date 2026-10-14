@@ -109,3 +109,19 @@ def test_cholesky_ok():
     data, _ = testing.random_problem(16, 4, 2, 4, seed=0)
     assert bool(core.cholesky_ok(data))
     assert not bool(core.cholesky_ok(dict(data, QN=jnp.zeros((4, 4)))))
+
+
+def test_breakdown_message_is_opt_in(capsys):
+    """The message after a non-finite step is a host callback after every solve: off unless report_breakdowns()."""
+    data, z0 = testing.random_problem(8, 2, 1, 2, seed=4)
+    bad = dict(z0, lam=z0['lam'].at[0, 0].set(jnp.nan))
+    try:
+        for on in (False, True):
+            core.report_breakdowns(on)
+            jax.clear_caches()                        # the setting is read when the solve is traced
+            jax.block_until_ready(core.ipm(data, bad))
+            jax.effects_barrier()
+            assert ('non-finite Newton step' in capsys.readouterr().out) == on
+    finally:
+        core.report_breakdowns(False)
+        jax.clear_caches()

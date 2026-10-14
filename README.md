@@ -120,6 +120,10 @@ ipm_options=None)` returns a `Solution`:
 - **Options.** `start='mehrotra'` uses Mehrotra's starting-point heuristic (fewer iterations on cold starts of hard
   QPs). `ipm_options` reaches the core's settings (`n_corr` Gondzio correctors, `refine` refinement steps,
   `refine_pred`, `combine`); the `'cuda'` backend implements the defaults only.
+- **Breakdowns.** A non-finite Newton step ends the solve with status 2. `pm.core.report_breakdowns()` also prints a
+  message when that happens; it is off by default because it is a host callback, a device-host round trip after
+  every solve (about 0.4 ms on the GPU, a fifth of a real-time MPC step). Call it before the first solve: compiled
+  solves keep the setting they were traced with.
 - **Checking a solution.** `pm.kkt_score(qp, sol)` measures any point on the QP, and
   `pm.testing.kkt_certificate(qp, sol)` evaluates the KKT conditions on an independent dense build of the QP.
 
